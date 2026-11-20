@@ -812,3 +812,14 @@ kbd {
   .how, .features, .keys-grid { grid-template-columns: 1fr; }
   .home { padding-top: 44px; }
 }
+.settings { display: flex; flex-direction: column; gap: 8px; padding: 12px 6px 0; border-top: 1px solid var(--edge); }
+.settings .switch { font-size: 13px; }
+
+/* Timeline dragging */
+.timeline { user-select: none; -webkit-user-select: none; }
+.timeline.dragging, .timeline.dragging * { cursor: grabbing !important; }
+.flag { cursor: grab; touch-action: none; }
+.flag.held { z-index: 5; }
+.flag.held span { background: var(--hi); transform: translateY(-3px); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4); }
+.flag span { transition: transform 0.15s ease, box-shadow 0.15s ease; }
+.tape { touch-action: none; }

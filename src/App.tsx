@@ -31,10 +31,11 @@ interface Prefs {
   nudgeMs: number; // shifts takes against the beat on playback
   follow: boolean; // auto-scroll the sheet to the active marker
   showMeter: boolean; // syllable counts + rhyme colors
+  splash: boolean; // startup animation when the site opens
 }
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true };
+  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true, splash: true };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
   } catch {
@@ -354,6 +355,28 @@ export default function App() {
     [project, update]
   );
 
+  /** Moves a section to a new time; in cover mode its original lines move with it. */
+  const moveMarker = useCallback(
+    (id: string, t: number) => {
+      if (!project) return;
+      update(project.id, (p) => ({
+        ...p,
+        markers: p.markers
+          .map((m) => {
+            if (m.id !== id) return m;
+            const d = t - m.time;
+            return {
+              ...m,
+              time: Math.max(0, t),
+              original: m.original?.map((l) => ({ ...l, t: Math.max(0, l.t + d) })),
+            };
+          })
+          .sort((a, b) => a.time - b.time),
+      }));
+    },
+    [project, update]
+  );
+
   const removeMarker = useCallback(
     async (m: Marker) => {
       if (!project) return;
@@ -653,15 +676,46 @@ export default function App() {
   const importCover = useCallback(
     (imported: Marker[], hit: LyricHit) => {
       if (!project) return;
+      const oldImported = project.markers.filter((m) => m.original);
+      if (oldImported.length) {
+        const ok = confirm(
+          `This song already has imported lyrics. Replace them with "${hit.track}"?\n\nYour written lines and takes stay with the nearest new section. Empty imported sections are removed, so nothing gets doubled.`
+        );
+        if (!ok) return;
+      }
+      const hasTakes = (id: string) => takes.some((t) => t.markerId === id);
+      // Pair new sections with old imported ones (within 4s) so your words and takes carry over.
+      // Sections you've written in or recorded on get first pick.
+      const hasContent = (m: Marker) => !!m.lyrics.trim() || hasTakes(m.id);
+      const order = [...oldImported].sort((a, b) => Number(hasContent(b)) - Number(hasContent(a)));
+      const used = new Set<string>();
+      const claim = new Map<number, Marker>(); // index in `imported` -> old marker
+      for (const o of order) {
+        let bi = -1;
+        imported.forEach((n, i) => {
+          if (claim.has(i) || Math.abs(o.time - n.time) > 4) return;
+          if (bi < 0 || Math.abs(o.time - n.time) < Math.abs(o.time - imported[bi].time)) bi = i;
+        });
+        if (bi >= 0) {
+          claim.set(bi, o);
+          used.add(o.id);
+        }
+      }
+      const merged = imported.map((n, i) => {
+        const o = claim.get(i);
+        return o ? { ...n, id: o.id, label: o.label, lyrics: o.lyrics } : n;
+      });
+      // Old imported sections with no match: keep them only if you wrote or recorded something there.
+      const leftovers = oldImported.filter((o) => !used.has(o.id) && (o.lyrics.trim() || hasTakes(o.id)));
       update(project.id, (p) => ({
         ...p,
-        markers: [...p.markers, ...imported].sort((a, b) => a.time - b.time),
-        cover: { track: hit.track, artist: hit.artist, showOriginal: true },
+        markers: [...p.markers.filter((m) => !m.original), ...leftovers, ...merged].sort((a, b) => a.time - b.time),
+        cover: { track: hit.track, artist: hit.artist, showOriginal: p.cover?.showOriginal ?? true },
       }));
       setCoverOpen(false);
-      flash(`Imported ${imported.length} sections`);
+      flash(oldImported.length ? `Replaced with ${merged.length} sections` : `Imported ${merged.length} sections`);
     },
-    [project, update, flash]
+    [project, takes, update, flash]
   );
 
   /** Moves every imported section (and its original lines) earlier or later. */
@@ -979,6 +1033,15 @@ export default function App() {
             </div>
           ))}
         </nav>
+        <div className="settings">
+          <span className="backup-lbl">Settings</span>
+          <Switch
+            on={prefs.splash}
+            onChange={(v) => setPrefs((p) => ({ ...p, splash: v }))}
+            label="Startup animation"
+            title="Play the record animation when the site opens"
+          />
+        </div>
         <div className="backup">
           <span className="backup-lbl">Backup</span>
           <div className="backup-grid">
@@ -1190,6 +1253,7 @@ export default function App() {
                 takes={takes}
                 activeId={activeId}
                 onSeek={(t) => seek(t)}
+                onMoveMarker={moveMarker}
                 recMarkerId={rec?.markerId ?? null}
                 loop={loop}
               />
@@ -1288,7 +1352,12 @@ export default function App() {
                     onFocused={() => setFocusMarkerId(null)}
                     onChange={(patch) => changeMarker(m.id, patch)}
                     onSeek={(play) => seek(m.time, play)}
-                    onRestamp={() => changeMarker(m.id, { time: Math.round(estimateNow() * 10) / 10 })}
+                    onRestamp={() => {
+                      const t = Math.round(estimateNow() * 10) / 10;
+                      if (Math.abs(t - m.time) < 0.05) return flash("This section is already at the playhead");
+                      if (!confirm(`Move "${m.label || `Section ${i + 1}`}" from ${fmt(m.time, true)} to ${fmt(t, true)}?\n\nThis changes where the section starts. To jump the video to this section instead, click its time.`)) return;
+                      moveMarker(m.id, t);
+                    }}
                     onDelete={() => removeMarker(m)}
                     onRecord={() => startRecording(m)}
                     onPlayTake={playTake}
