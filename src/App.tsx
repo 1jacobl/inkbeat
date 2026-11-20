@@ -15,6 +15,7 @@ import { YTPlayer, loadYouTubeAPI, parseStartParam, parseVideoId } from "./youtu
 import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, useClock } from "./clock";
 import { Segmented, Stepper, Switch } from "./ui";
 import logo from "./logo.svg";
+import Home from "./Home";
 import { exportBackup, exportLyricsText, importBackup } from "./backup";
 import { fmt, parseTime, uid } from "./time";
 import Timeline from "./Timeline";
@@ -89,6 +90,24 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [coverOpen, setCoverOpen] = useState(false);
+  const [view, setViewState] = useState<"home" | "song">(() => (window.location.hash === "#home" ? "home" : "song"));
+  const setView = useCallback((v: "home" | "song") => {
+    setViewState(v);
+    const want = v === "home" ? "#home" : "";
+    if (window.location.hash !== want) {
+      if (v === "home") window.location.hash = "home";
+      else history.pushState(null, "", window.location.pathname + window.location.search);
+    }
+  }, []);
+  useEffect(() => {
+    const onHash = () => setViewState(window.location.hash === "#home" ? "home" : "song");
+    window.addEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onHash);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
+    };
+  }, []);
 
   const playerRef = useRef<YTPlayer | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -117,6 +136,7 @@ export default function App() {
       setProjects(ps);
       const last = localStorage.getItem(LAST_KEY);
       setCurrentId(ps.find((p) => p.id === last)?.id ?? ps[0].id);
+      if (!ps.some((p) => p.videoId || p.markers.length)) setViewState("home");
       setLoaded(true);
     })();
   }, []);
@@ -566,7 +586,8 @@ export default function App() {
     setCurrentId(p.id);
     setLinkDraft("");
     setNavOpen(false);
-  }, []);
+    setView("song");
+  }, [setView]);
 
   const removeProject = useCallback(
     async (p: Project) => {
@@ -593,8 +614,9 @@ export default function App() {
       setCurrentId(id);
       setNavOpen(false);
       setLinkDraft("");
+      setView("song");
     },
-    [rec, finishRecording, stopTake]
+    [rec, finishRecording, stopTake, setView]
   );
 
   const linkVideo = useCallback(
@@ -873,11 +895,13 @@ export default function App() {
   );
 
   /* ---------- keyboard ---------- */
+  const viewRef = useRef(view);
+  viewRef.current = view;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.isContentEditable;
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && viewRef.current !== "home") {
         e.preventDefault();
         dropAtPlayhead();
         return;
@@ -887,7 +911,7 @@ export default function App() {
         if (rec) finishRecording();
         return;
       }
-      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (typing || e.metaKey || e.ctrlKey || e.altKey || viewRef.current === "home") return;
       if (e.key === " ") {
         e.preventDefault();
         if (rec) finishRecording();
@@ -922,10 +946,20 @@ export default function App() {
   return (
     <div className="app">
       <aside className={`rail ${navOpen ? "open" : ""}`}>
-        <div className="brand">
+        <button
+          className={`brand ${view === "home" ? "here" : ""}`}
+          onClick={() => {
+            if (rec) finishRecording();
+            stopTake();
+            playerRef.current?.pauseVideo();
+            setNavOpen(false);
+            setView("home");
+          }}
+          title="Home"
+        >
           <img className="brand-mark" src={logo} alt="" width={30} height={30} />
           Inkbeat
-        </div>
+        </button>
         <button className="new-song" onClick={createProject}>
           + New song
         </button>
@@ -976,7 +1010,20 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main">
+      {view === "home" && (
+        <main className="main home-main">
+          <button className="nav-toggle home-nav" onClick={() => setNavOpen((v) => !v)} aria-label="Songs">
+            ☰
+          </button>
+          <Home
+            currentTitle={project?.title ?? null}
+            songCount={projects.filter((p) => p.videoId || p.markers.length).length}
+            onOpen={() => setView("song")}
+            onNew={createProject}
+          />
+        </main>
+      )}
+      <main className="main" style={view === "home" ? { display: "none" } : undefined}>
         {project && (
           <>
             <header className="topbar">
