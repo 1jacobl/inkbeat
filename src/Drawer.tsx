@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import type { Project, Snapshot } from "./db";
 import { listSnapshots } from "./db";
 import { syllables } from "./rhyme";
+import { randomFlip, randomPrompt, randomWord, repeatedWords } from "./spark";
 
-export type DrawerTab = "notes" | "rhymes" | "history";
+export type DrawerTab = "notes" | "rhymes" | "history" | "spark";
 
 interface Props {
   tab: DrawerTab;
@@ -28,6 +29,7 @@ export default function Drawer(p: Props) {
               ["notes", "Notes"],
               ["rhymes", "Rhymes"],
               ["history", "History"],
+              ["spark", "Stuck?"],
             ] as const
           ).map(([k, label]) => (
             <button key={k} role="tab" aria-selected={p.tab === k} className={p.tab === k ? "on" : ""} onClick={() => p.onTab(k)}>
@@ -42,6 +44,7 @@ export default function Drawer(p: Props) {
       <div className="drawer-body">
         {p.tab === "notes" && <Notes value={p.project.notes ?? ""} onChange={p.onNotes} />}
         {p.tab === "rhymes" && <Rhymes word={p.word} onWord={p.onWord} flash={p.flash} />}
+        {p.tab === "spark" && <Spark project={p.project} onWord={(w) => { p.onWord(w); p.onTab("rhymes"); }} />}
         {p.tab === "history" && <History projectId={p.project.id} reloadKey={p.historyKey} onRestore={p.onRestore} />}
       </div>
     </aside>
@@ -235,6 +238,64 @@ function History({ projectId, reloadKey, onRestore }: { projectId: string; reloa
           );
         })}
       </ol>
+    </div>
+  );
+}
+
+/* ---------------- Writer's block ---------------- */
+function Spark({ project, onWord }: { project: Project; onWord: (w: string) => void }) {
+  const [words, setWords] = useState<string[]>(() => [randomWord(), randomWord(), randomWord()]);
+  const [prompt, setPrompt] = useState(randomPrompt);
+  const [flip, setFlip] = useState(randomFlip);
+  const all = project.markers.map((m) => m.lyrics).join("\n");
+  const repeats = repeatedWords(all, 4);
+  return (
+    <div className="spark">
+      <section>
+        <div className="spark-head">
+          <h3>Random words</h3>
+          <button onClick={() => setWords([randomWord(), randomWord(), randomWord()])}>New</button>
+        </div>
+        <p className="drawer-hint">Work one into your next bar. Click a word to find rhymes for it.</p>
+        <div className="spark-words">
+          {words.map((w, i) => (
+            <button key={i} onClick={() => onWord(w)}>
+              {w}
+            </button>
+          ))}
+        </div>
+      </section>
+      <section>
+        <div className="spark-head">
+          <h3>Write about</h3>
+          <button onClick={() => setPrompt(randomPrompt())}>New</button>
+        </div>
+        <p className="spark-prompt">{prompt}</p>
+      </section>
+      <section>
+        <div className="spark-head">
+          <h3>Flip the flow</h3>
+          <button onClick={() => setFlip(randomFlip())}>New</button>
+        </div>
+        <p className="spark-prompt">{flip}</p>
+      </section>
+      <section>
+        <h3>Words you lean on</h3>
+        {repeats.length ? (
+          <>
+            <p className="drawer-hint">Used 4+ times in this song. Click one for rhymes and swaps.</p>
+            <div className="spark-words repeats">
+              {repeats.map((r) => (
+                <button key={r.word} onClick={() => onWord(r.word)}>
+                  {r.word} <b>×{r.count}</b>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="drawer-hint">No word shows up 4+ times yet. Nice.</p>
+        )}
+      </section>
     </div>
   );
 }

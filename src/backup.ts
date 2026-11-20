@@ -1,5 +1,5 @@
 /* Backup files: songs + lyrics + recorded takes in one .json you can move between browsers/devices. */
-import { Project, Take, listTakes, saveProject, saveTake } from "./db";
+import { Project, Take, getBeat, listTakes, saveBeat, saveProject, saveTake } from "./db";
 import { fmt, uid } from "./time";
 
 const FORMAT = "inkbeat-backup";
@@ -14,6 +14,7 @@ interface BackupFile {
   exportedAt: string;
   projects: Project[];
   takes: TakeFile[];
+  beats?: { projectId: string; name: string; mime: string; audio: string }[];
 }
 
 function blobToBase64(b: Blob): Promise<string> {
@@ -55,7 +56,13 @@ export async function exportBackup(projects: Project[]): Promise<void> {
       takes.push({ ...rest, audio: await blobToBase64(blob) });
     }
   }
-  const file: BackupFile = { format: FORMAT, version: VERSION, exportedAt: new Date().toISOString(), projects, takes };
+  const beats: NonNullable<BackupFile["beats"]> = [];
+  for (const p of projects) {
+    if (!p.beat) continue;
+    const b = await getBeat(p.id).catch(() => null);
+    if (b) beats.push({ projectId: p.id, name: b.name, mime: b.mime, audio: await blobToBase64(b.blob) });
+  }
+  const file: BackupFile = { format: FORMAT, version: VERSION, exportedAt: new Date().toISOString(), projects, takes, beats };
   const date = new Date().toISOString().slice(0, 10);
   const name = projects.length === 1 ? `${slug(projects[0].title)}.inkbeat.json` : `inkbeat-backup-${date}.json`;
   download(name, new Blob([JSON.stringify(file)], { type: "application/json" }));
@@ -88,11 +95,22 @@ export async function importBackup(file: File, existingIds: Set<string>): Promis
     };
     await saveProject(project);
     added.push(project);
-    for (const t of data.takes.filter((x) => x.projectId === p.id)) {
+    const idMap = new Map<string, string>();
+    const mine = data.takes.filter((x) => x.projectId === p.id);
+    for (const t of mine) idMap.set(t.id, clash ? uid() : t.id);
+    for (const t of mine) {
       const { audio, ...rest } = t;
-      await saveTake({ ...rest, id: clash ? uid() : t.id, projectId: id, blob: base64ToBlob(audio, t.mime || "audio/webm") });
+      await saveTake({
+        ...rest,
+        id: idMap.get(t.id)!,
+        projectId: id,
+        ...(t.layerOf ? { layerOf: idMap.get(t.layerOf) ?? t.layerOf } : {}),
+        blob: base64ToBlob(audio, t.mime || "audio/webm"),
+      });
       takeCount++;
     }
+    const beat = data.beats?.find((b) => b.projectId === p.id);
+    if (beat) await saveBeat({ projectId: id, name: beat.name, mime: beat.mime, blob: base64ToBlob(beat.audio, beat.mime || "audio/mpeg") });
   }
   return { projects: added, takes: takeCount };
 }
@@ -140,7 +158,10 @@ export async function songCode(projects: Project[]): Promise<string> {
 
 /** Adds the songs in a code. Existing songs are never overwritten (a clash comes in as a copy). */
 export async function importSongCode(code: string, existingIds: Set<string>): Promise<Project[]> {
-  const t = code.trim().replace(/\s+/g, "");
+  let t = code.trim().replace(/\s+/g, "");
+  // A share link works too.
+  const hash = t.indexOf("#s=");
+  if (hash >= 0) t = CODE_PREFIX + t.slice(hash + 3);
   if (!t.startsWith(CODE_PREFIX)) throw new Error("That doesn't look like an Inkbeat code.");
   const kind = t[CODE_PREFIX.length];
   let bytes = fromB64Url(t.slice(CODE_PREFIX.length + 1));
@@ -160,6 +181,7 @@ export async function importSongCode(code: string, existingIds: Set<string>): Pr
       id: clash ? uid() : p.id,
       title: clash ? `${p.title} (pasted)` : p.title,
       markers: Array.isArray(p.markers) ? p.markers : [],
+      beat: undefined,
       createdAt: now,
       updatedAt: now,
     };

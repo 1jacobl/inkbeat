@@ -31,6 +31,8 @@ export interface Project {
   autoKey?: { tonic: number; mode: "major" | "minor"; from: "video name" | "audio" } | null;
   /** What the automatic lookup found (null = looked, found nothing; undefined = not looked yet). */
   autoBpm?: { bpm: number; from: "video name" | "description" | "song database" | "audio"; downbeat?: number } | null;
+  /** Your own beat file (audio stored in its own database). Used instead of a YouTube link. */
+  beat?: { name: string; duration: number; size: number };
   /** Free-form scratchpad for ideas, unused bars, references. */
   notes?: string;
   createdAt: number;
@@ -50,7 +52,19 @@ export interface Take {
   createdAt: number;
   /** The keeper for its section; used by "Play song". */
   starred?: boolean;
+  /** Recorded over another take (ad-libs, doubles): plays along with that take. */
+  layerOf?: string;
+  /** Sound settings for this take. */
+  fx?: TakeFx;
 }
+
+export interface TakeFx {
+  gain: number; // dB, -24..+12
+  low: number; // bass shelf dB
+  high: number; // treble shelf dB
+  reverb: number; // 0..1 wet
+}
+export const NO_FX: TakeFx = { gain: 0, low: 0, high: 0, reverb: 0 };
 
 const DB_NAME = "inkbeat";
 // No version number: open whatever version exists. Upgrading the main database can get stuck
@@ -150,6 +164,7 @@ export async function deleteProject(id: string): Promise<void> {
   await Promise.all(takes.map((t) => wrap(s.delete(t.id))));
   await wrap((await store("projects", "readwrite")).delete(id));
   await deleteSnapshotsFor(id).catch(() => {});
+  await deleteBeat(id).catch(() => {});
 }
 
 export async function listTakes(projectId: string): Promise<Take[]> {
@@ -202,4 +217,49 @@ export async function deleteSnapshotsFor(projectId: string): Promise<void> {
   const all = await listSnapshots(projectId);
   const s = await store("history", "readwrite");
   await Promise.all(all.map((x) => wrap(s.delete(x.id))));
+}
+
+/* ---------- beat files (own database so the main one never needs an upgrade) ---------- */
+export interface BeatFile {
+  projectId: string;
+  name: string;
+  mime: string;
+  blob: Blob;
+}
+const BEATS_DB = "inkbeat-beats";
+let beatsPromise: Promise<IDBDatabase> | null = null;
+function openBeats(): Promise<IDBDatabase> {
+  if (beatsPromise) return beatsPromise;
+  beatsPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(BEATS_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("beats")) db.createObjectStore("beats", { keyPath: "projectId" });
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        db.close();
+        beatsPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      beatsPromise = null;
+      reject(req.error);
+    };
+  });
+  return beatsPromise;
+}
+async function beatStore(mode: IDBTransactionMode) {
+  return (await openBeats()).transaction("beats", mode).objectStore("beats");
+}
+export async function getBeat(projectId: string): Promise<BeatFile | null> {
+  return (await wrap((await beatStore("readonly")).get(projectId) as IDBRequest<BeatFile | undefined>)) ?? null;
+}
+export async function saveBeat(b: BeatFile): Promise<void> {
+  await wrap((await beatStore("readwrite")).put(b));
+}
+export async function deleteBeat(projectId: string): Promise<void> {
+  await wrap((await beatStore("readwrite")).delete(projectId));
 }

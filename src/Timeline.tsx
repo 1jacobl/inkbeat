@@ -12,13 +12,15 @@ interface Props {
   onMoveMarker: (id: string, t: number) => void;
   loop: { start: number; end: number } | null;
   tempo: { bpm: number; downbeat: number; beatsPerBar: number } | null;
+  /** Waveform of an uploaded beat file. */
+  peaks?: Float32Array | null;
 }
 
 /**
  * A tape strip: the whole beat, with marker flags above and recorded flows below.
  * Drag the strip to scrub; drag a flag to move that section; click a flag to jump to it.
  */
-export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek, onMoveMarker, loop, tempo }: Props) {
+export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek, onMoveMarker, loop, tempo, peaks }: Props) {
   const duration = useClock((s) => Math.floor(s.duration * 10) / 10);
   const head = useClock((s) => (s.duration ? Math.round((s.now / s.duration) * 2000) / 20 : 0));
   const ref = useRef<HTMLDivElement>(null);
@@ -77,6 +79,7 @@ export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek
           <div className="ticks" />
         )}
         <div className="played" style={{ width: `${scrub ?? head}%` }} />
+        {peaks && <Wave peaks={peaks} />}
         {loop && (
           <div className="loop-zone" style={{ left: `${pct(loop.start)}%`, width: `${pct(loop.end) - pct(loop.start)}%` }} />
         )}
@@ -152,5 +155,22 @@ function BarLines({ tempo, duration }: { tempo: { bpm: number; downbeat: number;
         ) : null
       )}
     </div>
+  );
+}
+
+/** Mirrored waveform drawn as one SVG path, stretched across the strip. */
+export function Wave({ peaks, className = "wave" }: { peaks: Float32Array; className?: string }) {
+  const n = peaks.length;
+  let top = "M0 50";
+  let bot = "";
+  for (let i = 0; i < n; i += 2) {
+    const h = Math.max(0.6, peaks[i] * 48);
+    top += ` L${i} ${50 - h}`;
+    bot = ` L${i} ${50 + h}` + bot;
+  }
+  return (
+    <svg className={className} viewBox={`0 0 ${n} 100`} preserveAspectRatio="none" aria-hidden>
+      <path d={`${top} L${n} 50${bot} Z`} />
+    </svg>
   );
 }

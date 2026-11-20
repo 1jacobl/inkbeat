@@ -1008,3 +1008,186 @@ kbd {
 .dup-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: var(--r); background: rgba(232, 68, 44, 0.12); border: 1px solid rgba(232, 68, 44, 0.45); font-size: 14px; animation: rise 0.3s ease both; }
 .dup-bar b { color: var(--rec); }
 .dup-bar button { background: var(--rec); color: #fff; border: 0; border-radius: 999px; padding: 7px 16px; font-weight: 800; }
+
+/* ======================================================================
+   Beat files: upload, drop zone, waveform
+   ====================================================================== */
+.paste-or { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; color: var(--dim); font-size: 13px; }
+.paste-or > span { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); }
+.paste-or small { flex-basis: 100%; color: var(--faint); font-size: 12px; line-height: 1.4; }
+.upload-btn {
+  background: transparent; color: var(--chalk); border: 1px dashed var(--tape); border-radius: var(--r);
+  padding: 10px 16px; font-weight: 700;
+}
+.upload-btn:hover { background: rgba(200, 176, 131, 0.1); border-style: solid; }
+.screen.drag { border-color: var(--hi); box-shadow: 0 0 0 3px rgba(246, 214, 74, 0.25); }
+.drop-hint {
+  position: absolute; inset: 0; z-index: 6; display: grid; place-items: center;
+  background: rgba(21, 18, 14, 0.82); color: var(--hi); font-weight: 800; font-size: clamp(22px, 3vw, 34px);
+  border: 2px dashed var(--hi); border-radius: 10px; pointer-events: none;
+}
+.beat-busy {
+  position: absolute; left: 12px; bottom: 12px; z-index: 5;
+  background: var(--desk-2); border: 1px solid var(--edge); color: var(--chalk);
+  font-family: var(--mono); font-size: 11px; padding: 6px 10px; border-radius: 999px;
+  animation: rise 0.25s ease both;
+}
+.beatwave {
+  position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
+  padding: clamp(14px, 3vw, 28px);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 22px, rgba(200, 176, 131, 0.05) 22px 23px),
+    radial-gradient(120% 90% at 0% 100%, #2a2018 0%, #120f0b 70%);
+}
+.beatwave-name { font-weight: 800; font-size: clamp(16px, 2.2vw, 22px); letter-spacing: -0.02em; color: var(--chalk); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.beatwave-wave { position: relative; flex: 1; min-height: 0; }
+.bigwave { position: absolute; inset: 0; width: 100%; height: 100%; }
+.bigwave path { fill: var(--tape); opacity: 0.85; }
+.beatwave-played { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(232, 68, 44, 0.18); mix-blend-mode: screen; pointer-events: none; }
+.beatwave-head { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--rec); box-shadow: 0 0 10px rgba(232, 68, 44, 0.7); }
+.beatwave-wait { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.wave { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.wave path { fill: rgba(200, 176, 131, 0.32); }
+.beat-swap { display: flex; align-items: center; gap: 6px; }
+.beat-swap button { background: var(--desk-2); border: 1px solid var(--edge); border-radius: 999px; padding: 6px 12px; font-size: 12px; color: var(--chalk); }
+.beat-swap button:hover { border-color: var(--tape); }
+.beat-swap button.danger:hover { border-color: var(--rec); color: var(--rec); }
+.beat-name { font-family: var(--mono); font-size: 11px; color: var(--dim); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-error button { background: var(--hi); color: var(--ink); border: 0; border-radius: var(--r); padding: 8px 14px; font-weight: 800; }
+.export-vox.mix { border-color: var(--tape); }
+
+/* ======================================================================
+   Takes: layers, fx, A/B
+   ====================================================================== */
+.take.layer { background: transparent; border-style: dashed; margin-left: 14px; }
+.layer-tag { font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-soft); padding: 0 4px 0 6px; }
+.take-layer, .take-fx { border: 0; background: none; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); padding: 3px 6px; border-radius: 999px; white-space: nowrap; }
+.take-layer:hover:not(:disabled), .take-fx:hover { background: var(--rule); color: var(--ink); }
+.take-fx.set { background: var(--ink); color: var(--paper); font-weight: 700; }
+.fx-wrap { position: relative; display: inline-flex; }
+.fx-pop {
+  position: absolute; z-index: 30; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  width: 260px; padding: 12px; border-radius: 10px;
+  background: var(--desk-2); color: var(--chalk); border: 1px solid var(--edge);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column; gap: 8px;
+  animation: dialog-in 0.18s ease;
+}
+.fx-row { display: grid; grid-template-columns: 54px 1fr 52px; align-items: center; gap: 8px; font-size: 12px; }
+.fx-row output { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: right; }
+.fx-row input[type="range"] { accent-color: var(--hi); width: 100%; }
+.fx-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--edge); padding-top: 8px; font-size: 11px; color: var(--faint); }
+.fx-foot button { background: var(--desk-3); border: 1px solid var(--edge); border-radius: 6px; padding: 4px 10px; font-size: 12px; color: var(--chalk); }
+.layer-note { font-family: var(--mono); font-size: 11px; color: var(--rec); }
+.ab-btn { background: transparent; border: 1px solid var(--ink); color: var(--ink); border-radius: 999px; padding: 5px 12px; font-weight: 800; font-size: 12px; letter-spacing: 0.04em; }
+.ab-btn:hover { background: var(--ink); color: var(--paper); }
+
+.ab-bar {
+  position: fixed; z-index: 60; left: 50%; bottom: 18px; transform: translateX(-50%);
+  width: min(760px, calc(100% - 32px));
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 14px;
+  background: var(--desk-2); border: 1px solid var(--edge);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  animation: rise 0.25s ease both;
+}
+.ab-title { font-weight: 800; font-size: 15px; display: flex; flex-direction: column; line-height: 1.1; }
+.ab-title span { font-weight: 500; font-size: 11px; color: var(--dim); font-family: var(--mono); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ab-play { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--hi); color: var(--ink); font-size: 14px; flex: none; }
+.ab-side {
+  display: flex; align-items: center; gap: 6px; flex: 1; min-width: 200px;
+  padding: 5px; border-radius: 10px; border: 1px solid var(--edge); transition: border-color 0.15s, background-color 0.15s;
+}
+.ab-side.on { border-color: var(--hi); background: rgba(246, 214, 74, 0.08); }
+.ab-side > button:first-child {
+  width: 32px; height: 32px; border-radius: 8px; border: 0; flex: none;
+  background: var(--desk-3); color: var(--chalk); font-weight: 800;
+}
+.ab-side.on > button:first-child { background: var(--hi); color: var(--ink); }
+.ab-side select {
+  flex: 1; min-width: 0; background: var(--desk); color: var(--chalk); border: 1px solid var(--edge);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.ab-keep { background: none; border: 1px solid var(--edge); color: var(--chalk); border-radius: 999px; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+.ab-keep:hover:not(:disabled) { border-color: var(--hi); color: var(--hi); }
+.ab-keep:disabled { opacity: 1; color: var(--hi); border-color: transparent; }
+.ab-flip { background: none; border: 0; color: var(--dim); font-size: 18px; padding: 0 2px; display: inline-flex; align-items: center; gap: 4px; }
+.ab-flip kbd { font-size: 10px; }
+.ab-x { background: none; border: 0; color: var(--dim); font-size: 22px; line-height: 1; padding: 0 4px; }
+.ab-x:hover { color: var(--chalk); }
+
+/* ======================================================================
+   Pitch line
+   ====================================================================== */
+.pitch-dock {
+  position: fixed; z-index: 55; right: 18px; bottom: 18px; width: min(440px, calc(100% - 36px));
+  animation: rise 0.25s ease both;
+}
+.pitch {
+  --pitch-ink: #efe6d2; --pitch-off: #e8442c; --pitch-lane: rgba(200, 176, 131, 0.1); --pitch-tonic: rgba(246, 214, 74, 0.22);
+  background: var(--desk-2); border: 1px solid var(--edge); border-radius: 12px; padding: 10px 12px 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+}
+.pitch-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 6px; font-weight: 800; font-size: 13px; }
+.pitch-head .pitch-key { font-weight: 500; font-family: var(--mono); font-size: 10px; color: var(--dim); text-align: right; }
+.pitch-canvas { display: block; width: 100%; height: 150px; }
+
+/* ======================================================================
+   Flow grid + repeats
+   ====================================================================== */
+.pad-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+.grid-btn { background: none; border: 1px solid var(--rule); color: var(--ink-soft); border-radius: 999px; padding: 3px 10px; font-family: var(--mono); font-size: 11px; }
+.grid-btn:hover, .grid-btn.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.repeats { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.repeats button { background: rgba(232, 68, 44, 0.1); color: var(--rec-deep); border: 0; border-radius: 4px; padding: 2px 6px; font-family: var(--mono); font-size: 11px; }
+.repeats button:hover { background: rgba(232, 68, 44, 0.2); }
+.flowgrid { margin-top: 10px; padding: 10px; border-radius: 8px; background: var(--paper-2); border: 1px solid var(--rule); overflow-x: auto; animation: rise 0.2s ease both; }
+.fg-legend, .fg-cells { display: grid; grid-template-columns: repeat(16, minmax(26px, 1fr)); gap: 2px; min-width: 470px; }
+.fg-legend { margin-right: 150px; }
+.fg-legend span { grid-column: span 4; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); padding-left: 3px; }
+.fg-row { display: flex; align-items: center; gap: 10px; margin-top: 3px; }
+.fg-row .fg-cells { flex: 1; }
+.fg-cell {
+  height: 26px; border-radius: 3px; background: rgba(30, 26, 20, 0.05);
+  font-family: var(--type); font-size: 11px; color: var(--ink); display: grid; place-items: center;
+  overflow: hidden; white-space: nowrap; padding: 0 1px;
+}
+.fg-cell.beat { box-shadow: inset 2px 0 0 rgba(30, 26, 20, 0.28); }
+.fg-cell.on { background: rgba(246, 214, 74, 0.55); }
+.fg-cell.on.word { background: var(--hi); font-weight: 700; }
+.fg-pace { width: 140px; flex: none; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); white-space: nowrap; }
+.fg-pace.over { color: var(--rec-deep); font-weight: 700; }
+.fg-hint { margin: 8px 0 0; font-size: 11px; color: var(--ink-soft); font-family: var(--mono); }
+
+/* ======================================================================
+   Stuck? (writer's block)
+   ====================================================================== */
+.spark { display: flex; flex-direction: column; gap: 18px; }
+.spark h3 { margin: 0; font-size: 15px; font-weight: 800; }
+.spark-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.spark-head button { background: var(--desk-3); border: 1px solid var(--edge); border-radius: 999px; padding: 4px 12px; font-size: 12px; color: var(--chalk); }
+.spark-head button:hover { border-color: var(--tape); }
+.spark-words { display: flex; flex-wrap: wrap; gap: 6px; }
+.spark-words button { background: var(--hi); color: var(--ink); border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 800; font-size: 16px; }
+.spark-words.repeats button { background: var(--desk-3); color: var(--chalk); font-weight: 600; font-size: 13px; border: 1px solid var(--edge); }
+.spark-words.repeats b { color: var(--rec); font-family: var(--mono); font-size: 11px; }
+.spark-prompt { margin: 0; font-family: var(--type); font-size: 17px; line-height: 1.4; color: var(--chalk); background: var(--desk); border: 1px solid var(--edge); border-radius: 8px; padding: 12px; }
+
+@media (max-width: 700px) {
+  .ab-bar { bottom: 10px; }
+  .ab-side { min-width: 100%; }
+  .pitch-dock { right: 10px; bottom: 10px; width: calc(100% - 20px); }
+  .beat-name { display: none; }
+}
+.take { max-width: 100%; flex-wrap: wrap; row-gap: 2px; }
+.take:has(.fx-pop) { position: relative; z-index: 40; }
+.layer-tag { white-space: nowrap; }
+.fx-pop { left: auto; right: -8px; transform: none; }
+@media (max-width: 700px) {
+  .take-meta { display: none; }
+  .take.layer { margin-left: 8px; }
+}
+@media (max-width: 700px) {
+  .ab-bar { padding-right: 40px; }
+  .ab-x { position: absolute; top: 8px; right: 8px; }
+}

@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { analyze } from "./rhyme";
 import { Switch } from "./ui";
-import type { Marker, OrigLine, Take } from "./db";
+import { NO_FX, Marker, OrigLine, Take, TakeFx } from "./db";
+import { flowRow, paceLabel, repeatedWords } from "./spark";
+import { isFlat } from "./fx";
 import type { RecPhase } from "./App";
 import { fmt, parseTime } from "./time";
 import { useClock } from "./clock";
@@ -41,6 +43,13 @@ interface Props {
   onPunch: (t: Take) => void;
   onPunchIn: () => void;
   onStopPunch: () => void;
+  bpm?: number;
+  /** Record a new take while this one plays (ad-libs, doubles). */
+  onLayer: (t: Take) => void;
+  /** Take id being recorded over, if this section is recording a layer. */
+  layeringOver: string | null;
+  onFx: (t: Take, fx: TakeFx) => void;
+  onCompare: () => void;
 }
 
 export default function MarkerBlock(p: Props) {
@@ -66,6 +75,20 @@ export default function MarkerBlock(p: Props) {
 
   const span = p.nextTime !== undefined ? p.nextTime - marker.time : undefined;
   const lines = marker.lyrics.split("\n").filter((l) => l.trim()).length;
+  const [grid, setGrid] = useState(false);
+  const repeats = useMemo(() => repeatedWords(marker.lyrics, 3), [marker.lyrics]);
+  // Layers sit right under the take they were recorded over.
+  const ordered = useMemo(() => {
+    const ids = new Set(takes.map((t) => t.id));
+    const bases = takes.filter((t) => !t.layerOf || !ids.has(t.layerOf));
+    const out: Take[] = [];
+    for (const b of bases) {
+      out.push(b);
+      out.push(...takes.filter((t) => t.layerOf === b.id));
+    }
+    return out;
+  }, [takes]);
+  const baseCount = takes.filter((t) => !t.layerOf).length;
 
   return (
     <article
@@ -165,7 +188,27 @@ export default function MarkerBlock(p: Props) {
             onSelectWord={p.onSelectWord}
           />
         )}
-        {lines > 0 && <div className="bar-count">{lines} bar{lines === 1 ? "" : "s"}</div>}
+        {(lines > 0 || repeats.length > 0) && (
+          <div className="pad-foot">
+            {lines > 0 && <span className="bar-count">{lines} bar{lines === 1 ? "" : "s"}</span>}
+            {lines > 0 && (
+              <button className={`grid-btn ${grid ? "on" : ""}`} onClick={() => setGrid((g) => !g)} aria-pressed={grid} title="See each line spread over one bar of 16 steps">
+                {grid ? "hide flow grid" : "flow grid"}
+              </button>
+            )}
+            {repeats.length > 0 && (
+              <span className="repeats" title="Words you've used 3+ times in this section">
+                repeats:{" "}
+                {repeats.slice(0, 4).map((r) => (
+                  <button key={r.word} onClick={() => p.onSelectWord(r.word)} title={`Find rhymes and swaps for "${r.word}"`}>
+                    {r.word} ×{r.count}
+                  </button>
+                ))}
+              </span>
+            )}
+          </div>
+        )}
+        {grid && lines > 0 && <FlowGrid lyrics={marker.lyrics} bpm={p.bpm} />}
 
         <div className="flows">
           <button
@@ -177,6 +220,14 @@ export default function MarkerBlock(p: Props) {
             <span className="rec-dot" aria-hidden />
             {p.rec === "arming" ? "Cueing beat…" : p.rec === "recording" ? <RecTimer /> : "Record flow"}
           </button>
+          {p.rec && p.layeringOver && (
+            <span className="layer-note">over {takes.find((t) => t.id === p.layeringOver)?.name ?? "a take"}</span>
+          )}
+          {baseCount >= 2 && !p.rec && (
+            <button className="ab-btn" onClick={p.onCompare} title="Play two takes in sync and flip between them">
+              A/B
+            </button>
+          )}
           {takes.length > 0 && (
             <Switch
               on={p.withBeat}
@@ -187,10 +238,14 @@ export default function MarkerBlock(p: Props) {
             />
           )}
           <ul className="takes">
-            {takes.map((t) => (
+            {ordered.map((t) => (
               <TakeChip
                 key={t.id}
                 take={t}
+                isLayer={!!t.layerOf && takes.some((x) => x.id === t.layerOf)}
+                onLayer={() => p.onLayer(t)}
+                layerBusy={!!p.rec || p.recBusy}
+                onFx={(fx) => p.onFx(t, fx)}
                 playing={p.playingTakeId === t.id}
                 inSong={p.songTakeId === t.id}
                 onStar={() => p.onStarTake(t)}
@@ -229,6 +284,10 @@ function RecTimer() {
 
 function TakeChip({
   take,
+  isLayer,
+  onLayer,
+  layerBusy,
+  onFx,
   playing,
   onPlay,
   onRename,
@@ -242,6 +301,10 @@ function TakeChip({
   onStopPunch,
 }: {
   take: Take;
+  isLayer: boolean;
+  onLayer: () => void;
+  layerBusy: boolean;
+  onFx: (fx: TakeFx) => void;
   playing: boolean;
   inSong: boolean;
   onStar: () => void;
@@ -263,10 +326,12 @@ function TakeChip({
     return () => URL.revokeObjectURL(u);
   }, [take.blob]);
 
+  const [fxOpen, setFxOpen] = useState(false);
   const ext = take.mime.includes("wav") ? "wav" : take.mime.includes("mp4") ? "m4a" : take.mime.includes("ogg") ? "ogg" : "webm";
 
   return (
-    <li className={`take ${playing ? "playing" : ""} ${take.starred ? "starred" : ""} ${punchPhase ? "punching " + punchPhase : ""}`}>
+    <li className={`take ${playing ? "playing" : ""} ${take.starred ? "starred" : ""} ${punchPhase ? "punching " + punchPhase : ""} ${isLayer ? "layer" : ""}`}>
+      {isLayer && <span className="layer-tag" title="Recorded over the take above; plays along with it">↳ layer</span>}
       <button className="take-play" onClick={onPlay} aria-label={playing ? `Stop ${take.name}` : `Play ${take.name}`}>
         {playing ? "■" : "▶"}
       </button>
@@ -316,6 +381,22 @@ function TakeChip({
       ) : (
         <span className="take-punch wait">{punchPhase === "saving" ? "saving…" : "cueing…"}</span>
       )}
+      {!isLayer && (
+        <button className="take-layer" onClick={onLayer} disabled={layerBusy} title="Record ad-libs or a double while this take plays. Use headphones.">
+          + layer
+        </button>
+      )}
+      <span className="fx-wrap">
+        <button
+          className={`take-fx ${isFlat(take.fx) ? "" : "set"}`}
+          onClick={() => setFxOpen((o) => !o)}
+          aria-expanded={fxOpen}
+          title="Volume, bass, treble and reverb for this take"
+        >
+          fx
+        </button>
+        {fxOpen && <FxPanel fx={take.fx ?? NO_FX} onChange={onFx} onClose={() => setFxOpen(false)} />}
+      </span>
       <a
         className="take-dl"
         href={href ?? "#"}
@@ -432,6 +513,73 @@ function LyricPad({
           ))}
         </ol>
       )}
+    </div>
+  );
+}
+
+function FxPanel({ fx, onChange, onClose }: { fx: TakeFx; onChange: (fx: TakeFx) => void; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!ref.current?.contains(t) && !t.closest(".take-fx")) onClose();
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [onClose]);
+  const row = (k: keyof TakeFx, label: string, min: number, max: number, step: number, show: (v: number) => string) => (
+    <label className="fx-row">
+      <span>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={fx[k]} onChange={(e) => onChange({ ...fx, [k]: parseFloat(e.target.value) })} />
+      <output>{show(fx[k])}</output>
+    </label>
+  );
+  const db = (v: number) => `${v > 0 ? "+" : ""}${v} dB`;
+  return (
+    <div className="fx-pop" ref={ref} role="dialog" aria-label="Take sound">
+      {row("gain", "Volume", -24, 12, 1, db)}
+      {row("low", "Bass", -12, 12, 1, db)}
+      {row("high", "Treble", -12, 12, 1, db)}
+      {row("reverb", "Reverb", 0, 1, 0.05, (v) => `${Math.round(v * 100)}%`)}
+      <div className="fx-foot">
+        <span>Changes play live and go into exports.</span>
+        <button onClick={() => onChange(NO_FX)} disabled={isFlat(fx)}>
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Each line laid over one bar (4 beats × 4 steps), spread evenly, so you can see how dense it is. */
+function FlowGrid({ lyrics, bpm }: { lyrics: string; bpm?: number }) {
+  const rows = useMemo(() => lyrics.split("\n").filter((l) => l.trim()).map((l) => ({ line: l, ...flowRow(l) })), [lyrics]);
+  const barSec = bpm ? (4 * 60) / bpm : 0;
+  return (
+    <div className="flowgrid" aria-label="Flow grid">
+      <div className="fg-legend">
+        <span>1</span>
+        <span>2</span>
+        <span>3</span>
+        <span>4</span>
+      </div>
+      {rows.map((r, i) => (
+        <div className="fg-row" key={i} title={r.line}>
+          <div className="fg-cells">
+            {r.cells.map((c, k) => (
+              <span key={k} className={`fg-cell ${c.text ? "on" : ""} ${c.start ? "word" : ""} ${k % 4 === 0 ? "beat" : ""}`}>
+                {c.text}
+              </span>
+            ))}
+          </div>
+          <span className={`fg-pace ${r.overflow ? "over" : ""}`}>
+            {r.total}
+            {r.overflow ? ` (+${r.overflow})` : ""} · {paceLabel(r.total)}
+            {barSec ? ` · ${(r.total / barSec).toFixed(1)}/s` : ""}
+          </span>
+        </div>
+      ))}
+      <p className="fg-hint">One line = one bar, spread evenly over 16 steps. 8 syllables lands on eighth notes, 16 on sixteenths.</p>
     </div>
   );
 }

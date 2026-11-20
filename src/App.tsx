@@ -10,7 +10,14 @@ import {
   listTakes,
   saveProject,
   saveTake,
+  TakeFx,
+  getBeat,
+  saveBeat,
+  deleteBeat,
 } from "./db";
+import { BEAT_TYPES, FilePlayer, analyzeBeat, decodeFile, peaks, titleFromFile } from "./beatfile";
+import { routeAudio } from "./fx";
+import PitchLine from "./Pitch";
 import { YTPlayer, loadYouTubeAPI, parseStartParam, parseVideoId } from "./youtube";
 import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, useClock } from "./clock";
 import { KeyPicker, Segmented, Stepper, Switch } from "./ui";
@@ -25,7 +32,7 @@ import { captureTabAudio, detectFromStream, findBpm } from "./bpm";
 import { bpmFromTitle, countIn, makeTapper, metronome, snapToBeat } from "./metronome";
 import { exportBackup, exportLyricsText, importBackup, importSongCode, songCode } from "./backup";
 import { fmt, parseTime, uid } from "./time";
-import Timeline from "./Timeline";
+import Timeline, { Wave } from "./Timeline";
 import MarkerBlock from "./MarkerBlock";
 import CoverDialog from "./CoverDialog";
 import { findDuplicates, pairSections } from "./dedupe";
@@ -43,15 +50,21 @@ interface Prefs {
   metronome: boolean; // click track while the beat plays (needs a BPM)
   countIn: boolean; // four clicks before recording starts
   snap: boolean; // markers snap to the nearest beat
+  pitch: boolean; // live pitch line while recording
 }
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true, splash: true, metronome: false, countIn: true, snap: false };
+  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true, splash: true, metronome: false, countIn: true, snap: false, pitch: true };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
   } catch {
     return d;
   }
+}
+
+/** True when the song has something to play: a YouTube link or an uploaded beat file. */
+export function hasBeat(p: Project | null | undefined): boolean {
+  return !!(p && (p.videoId || p.beat));
 }
 
 function newProject(): Project {
@@ -163,7 +176,7 @@ export default function App() {
       setProjects(ps);
       const last = localStorage.getItem(LAST_KEY);
       setCurrentId(ps.find((p) => p.id === last)?.id ?? ps[0].id);
-      if (!ps.some((p) => p.videoId || p.markers.length)) setViewState("home");
+      if (!ps.some((p) => hasBeat(p) || p.markers.length)) setViewState("home");
       setLoaded(true);
     })();
   }, []);
@@ -217,7 +230,9 @@ export default function App() {
 
   /* ---------- player ---------- */
   const usingBacking = !!(project?.backing && project.source === "backing");
-  const videoId = (usingBacking ? project!.backing!.videoId : project?.videoId) || "";
+  const fileKey = !usingBacking && project?.beat ? `file:${project.id}:${project.beat.size}:${project.beat.name}` : "";
+  const videoId = fileKey || (usingBacking ? project!.backing!.videoId : project?.videoId) || "";
+  const [beatPeaks, setBeatPeaks] = useState<Float32Array | null>(null);
   const timeOffset = usingBacking ? project!.backing!.offset : 0;
   const offsetRef = useRef(timeOffset);
   offsetRef.current = timeOffset;
@@ -245,6 +260,48 @@ export default function App() {
         ? { t: estimateNow(), play: isPlaying(), project: currentIdRef.current || "" }
         : null;
     lastPlayerProjectRef.current = currentIdRef.current;
+    setBeatPeaks(null);
+    if (videoId.startsWith("file:")) {
+      const projectId = videoId.split(":")[1];
+      try {
+        playerRef.current?.destroy();
+      } catch {}
+      playerRef.current = null;
+      attachPlayer(null);
+      setReady(false);
+      if (hostRef.current) hostRef.current.innerHTML = "";
+      (async () => {
+        const b = await getBeat(projectId).catch(() => null);
+        if (cancelled) return;
+        if (!b) return setPlayerError("The beat file for this song is missing on this device. Upload it again.");
+        const fp = new FilePlayer(b.blob, b.name);
+        try {
+          await fp.ready();
+        } catch {
+          fp.destroy();
+          return !cancelled && setPlayerError("Couldn't read that audio file. Try an MP3 or WAV.");
+        }
+        if (cancelled) return fp.destroy();
+        playerRef.current = fp;
+        attachPlayer(fp);
+        setOffset(0);
+        if (import.meta.env.DEV) (window as any).__player = fp;
+        setReady(true);
+        const r = resumeRef.current;
+        resumeRef.current = null;
+        if (r && r.t > 0.5) {
+          fp.seekTo(r.t);
+          noteSeek(r.t);
+          if (r.play) fp.playVideo();
+        }
+        decodeFile(b.blob)
+          .then((buf) => !cancelled && setBeatPeaks(peaks(buf)))
+          .catch(() => {});
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
     loadYouTubeAPI().then((YT) => {
       if (cancelled || !hostRef.current) return;
       // A fresh player per beat: reusing one iframe with cueVideoById can leave a black screen.
@@ -428,25 +485,46 @@ export default function App() {
     else p.unMute();
   }, []);
 
+  // Live sound-setting handles for whatever is playing, so fx changes are heard right away.
+  const liveFx = useRef(new Map<string, { set(fx: TakeFx): void }>());
+  const extraAudios = useRef<{ audio: HTMLAudioElement; url: string }[]>([]);
   const stopTake = useCallback(() => {
     playTokenRef.current++;
     const a = audioRef.current;
+    for (const x of extraAudios.current) {
+      x.audio.pause();
+      URL.revokeObjectURL(x.url);
+    }
+    extraAudios.current = [];
     if (a) {
       a.audio.pause();
       URL.revokeObjectURL(a.url);
       audioRef.current = null;
       setBeatMuted(false);
     }
+    liveFx.current.clear();
     setPlayingTakeId(null);
   }, [setBeatMuted]);
 
   const toggleTakeBeat = useCallback(
     (on: boolean) => {
       setTakeBeat(on);
-      if (audioRef.current || songModeRef.current) setBeatMuted(!on);
+      if (audioRef.current || songModeRef.current || compareRef.current) setBeatMuted(!on);
     },
     [setBeatMuted]
   );
+
+  /** Starts `audio` so its first sample lines up with song time `start` (beat already rolling). */
+  const startInSync = useCallback(async (audio: HTMLAudioElement, start: number, alive: () => boolean) => {
+    const offset = estimateNow() - start + prefsRef.current.nudgeMs / 1000;
+    if (offset >= 0) {
+      audio.currentTime = offset;
+      await audio.play().catch(() => {});
+    } else {
+      await sleep(-offset * 1000);
+      if (alive()) await audio.play().catch(() => {});
+    }
+  }, []);
 
   const playTake = useCallback(
     async (take: Take) => {
@@ -457,6 +535,7 @@ export default function App() {
       const url = URL.createObjectURL(take.blob);
       const audio = new Audio(url);
       audio.preload = "auto";
+      liveFx.current.set(take.id, routeAudio(audio, take.fx));
       audioRef.current = { audio, url, takeId: take.id };
       setPlayingTakeId(take.id);
       audio.onended = () => {
@@ -464,13 +543,24 @@ export default function App() {
         playerRef.current?.pauseVideo();
         stopTake();
       };
+      // Layers recorded over this take play along with it.
+      const layers = takesRef.current.filter((t) => t.layerOf === take.id);
+      const layerAudios = layers.map((l) => {
+        const u = URL.createObjectURL(l.blob);
+        const el = new Audio(u);
+        el.preload = "auto";
+        liveFx.current.set(l.id, routeAudio(el, l.fx));
+        extraAudios.current.push({ audio: el, url: u });
+        return { el, l };
+      });
 
       if (!playerRef.current) {
         await audio.play().catch(() => {});
+        layerAudios.forEach(({ el }) => el.play().catch(() => {}));
         return;
       }
       setBeatMuted(!takeBeatRef.current);
-      const ok = await rollFrom(take.start, alive);
+      const ok = await rollFrom(Math.min(take.start, ...layers.map((l) => l.start)), alive);
       if (!ok || !alive()) {
         if (alive()) {
           flash("Couldn't start the beat");
@@ -478,16 +568,10 @@ export default function App() {
         }
         return;
       }
-      const offset = estimateNow() - take.start + prefs.nudgeMs / 1000;
-      if (offset >= 0) {
-        audio.currentTime = offset;
-        await audio.play().catch(() => {});
-      } else {
-        await sleep(-offset * 1000);
-        if (alive()) await audio.play().catch(() => {});
-      }
+      layerAudios.forEach(({ el, l }) => startInSync(el, l.start, alive));
+      await startInSync(audio, take.start, alive);
     },
-    [rec, rollFrom, stopTake, setBeatMuted, prefs.nudgeMs, flash]
+    [rec, rollFrom, stopTake, setBeatMuted, flash, startInSync]
   );
   const takeBeatRef = useRef(takeBeat);
   takeBeatRef.current = takeBeat;
@@ -500,7 +584,19 @@ export default function App() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
     streamRef.current = s;
+    setMicStream(s);
     return s;
+  }, []);
+  const [micStream, setMicStream] = useState<MediaStream | null>(null);
+  const [layerOver, setLayerOver] = useState<string | null>(null);
+  const layerAudioRef = useRef<{ audio: HTMLAudioElement; url: string } | null>(null);
+  const stopLayerBase = useCallback(() => {
+    const a = layerAudioRef.current;
+    if (a) {
+      a.audio.pause();
+      URL.revokeObjectURL(a.url);
+    }
+    layerAudioRef.current = null;
   }, []);
 
   const finishRecording = useCallback(() => {
@@ -511,14 +607,16 @@ export default function App() {
       recorderRef.current = null;
       setRec(null);
     }
+    stopLayerBase();
     playerRef.current?.pauseVideo();
-  }, []);
+  }, [stopLayerBase]);
 
   const startRecording = useCallback(
-    async (m: Marker) => {
+    async (m: Marker, over?: Take) => {
       if (!project || !playerRef.current) return flash("Load a beat first");
       if (rec) return finishRecording();
       stopTake();
+      setLayerOver(over?.id ?? null);
       const token = ++recTokenRef.current;
       const alive = () => recTokenRef.current === token;
       setRec({ markerId: m.id, phase: "arming" });
@@ -542,16 +640,19 @@ export default function App() {
         const info = recorderRef.current;
         recorderRef.current = null;
         setRec(null);
+        setLayerOver(null);
         if (!info || !chunks.length) return;
         const duration = (performance.now() - info.t0) / 1000;
         if (duration < 0.4) return;
         const blob = new Blob(chunks, { type: recorder.mimeType || mime || "audio/webm" });
-        const existing = takesRef.current.filter((t) => t.markerId === info.markerId).length;
+        const existing = takesRef.current.filter((t) => t.markerId === info.markerId && !t.layerOf).length;
+        const layerNo = over ? takesRef.current.filter((t) => t.layerOf === over.id).length + 1 : 0;
         const take: Take = {
           id: uid(),
           projectId,
           markerId: info.markerId,
-          name: `Take ${existing + 1}`,
+          ...(over ? { layerOf: over.id } : {}),
+          name: over ? `${over.name} layer ${layerNo}` : `Take ${existing + 1}`,
           start: info.startBeat,
           duration,
           mime: blob.type,
@@ -569,7 +670,7 @@ export default function App() {
       }
       // Start the mic first so nothing at the marker gets clipped, then roll the beat.
       // Once the beat is steady, work out which beat time lines up with the take's first sample.
-      const target = Math.max(0, m.time - prefs.leadIn);
+      const target = over ? Math.max(0, over.start) : Math.max(0, m.time - prefs.leadIn);
       await new Promise<void>((resolve) => {
         recorder.onstart = () => resolve();
         recorder.start(250);
@@ -585,10 +686,19 @@ export default function App() {
           recorder.onstop = null;
           recorder.stop();
           setRec(null);
+          setLayerOver(null);
           playerRef.current?.pauseVideo();
           flash("Couldn't start the beat");
         }
         return;
+      }
+      if (over) {
+        // Play the take you're layering over, locked to the beat.
+        const url = URL.createObjectURL(over.blob);
+        const audio = new Audio(url);
+        routeAudio(audio, over.fx);
+        layerAudioRef.current = { audio, url };
+        startInSync(audio, over.start, alive);
       }
       setRec({ markerId: m.id, phase: "recording" });
       await sleep(400);
@@ -596,7 +706,7 @@ export default function App() {
         recorderRef.current.startBeat = Math.round((estimateNow() - (performance.now() - t0) / 1000) * 1000) / 1000;
       }
     },
-    [project, rec, finishRecording, stopTake, getStream, rollFrom, prefs.leadIn, prefs.countIn, flash]
+    [project, rec, finishRecording, stopTake, getStream, rollFrom, prefs.leadIn, prefs.countIn, flash, startInSync]
   );
   const takesRef = useRef(takes);
   takesRef.current = takes;
@@ -671,6 +781,8 @@ export default function App() {
         projectId: take.projectId,
         markerId: take.markerId,
         name: `${take.name.replace(/ \(punch.*\)$/, "")} (punch)`,
+        ...(take.layerOf ? { layerOf: take.layerOf } : {}),
+        ...(take.fx ? { fx: take.fx } : {}),
         start: take.start,
         duration,
         mime: "audio/wav",
@@ -751,26 +863,46 @@ export default function App() {
 
   /* ---------- export vocals ---------- */
   const [exporting, setExporting] = useState(false);
-  const exportVocals = useCallback(async () => {
+  const exportVocals = useCallback(async (withBeat = false) => {
     if (!project || !songTakesRef.current.length) return flash("Record a flow first");
     setExporting(true);
     try {
-      const blob = await mixTakes(songTakesRef.current);
+      const beat = withBeat && project.beat ? await getBeat(project.id) : null;
+      if (withBeat && !beat) throw new Error("no beat");
+      const blob = await mixTakes(songTakesRef.current, beat ? { blob: beat.blob, gain: 0.8 } : null);
       const a = document.createElement("a");
       const url = URL.createObjectURL(blob);
       a.href = url;
-      a.download = `${project.title.replace(/[^\w\- ]+/g, "").trim() || "song"} - vocals.wav`;
+      a.download = `${project.title.replace(/[^\w\- ]+/g, "").trim() || "song"} - ${beat ? "full mix" : "vocals"}.wav`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 3000);
-      flash("Vocals exported. The file starts at 0:00 so it lines up with the beat.");
+      flash(beat ? "Full mix exported: your keeper takes over the beat." : "Vocals exported. The file starts at 0:00 so it lines up with the beat.");
     } catch {
       flash("Export failed");
     } finally {
       setExporting(false);
     }
   }, [project, flash]);
+
+  const fxTimers = useRef(new Map<string, number>());
+  const changeFx = useCallback((take: Take, fx: TakeFx) => {
+    liveFx.current.get(take.id)?.set(fx);
+    let next: Take | null = null;
+    setTakes((ts) =>
+      ts.map((t) => {
+        if (t.id !== take.id) return t;
+        next = { ...t, fx };
+        return next;
+      })
+    );
+    window.clearTimeout(fxTimers.current.get(take.id));
+    fxTimers.current.set(
+      take.id,
+      window.setTimeout(() => next && saveTake(next), 400)
+    );
+  }, []);
 
   const renameTake = useCallback(async (take: Take, name: string) => {
     const next = { ...take, name };
@@ -780,10 +912,12 @@ export default function App() {
 
   const removeTake = useCallback(
     async (take: Take) => {
-      if (!confirm(`Delete "${take.name}"?`)) return;
+      const layers = takesRef.current.filter((t) => t.layerOf === take.id);
+      if (!confirm(`Delete "${take.name}"${layers.length ? ` and its ${layers.length} layer${layers.length > 1 ? "s" : ""}` : ""}?`)) return;
       if (playingTakeId === take.id) stopTake();
-      await deleteTake(take.id);
-      setTakes((ts) => ts.filter((t) => t.id !== take.id));
+      const gone = new Set([take.id, ...layers.map((l) => l.id)]);
+      await Promise.all([...gone].map(deleteTake));
+      setTakes((ts) => ts.filter((t) => !gone.has(t.id)));
     },
     [playingTakeId, stopTake]
   );
@@ -835,13 +969,101 @@ export default function App() {
       if (!project) return;
       const id = parseVideoId(raw);
       if (!id) return flash("That doesn't look like a YouTube link");
-      update(project.id, (p) => ({ ...p, url: raw.trim(), videoId: id }));
+      if (project.beat) deleteBeat(project.id).catch(() => {});
+      update(project.id, (p) => {
+        const { beat, ...rest } = p;
+        return beat ? { ...rest, url: raw.trim(), videoId: id, autoBpm: undefined, autoKey: undefined } : { ...p, url: raw.trim(), videoId: id };
+      });
       setLinkDraft("");
       const start = parseStartParam(raw);
       if (start) setTimeout(() => seek(start), 1500);
     },
     [project, update, flash, seek]
   );
+
+  /** Your own beat file: stored on this device, then BPM and key are worked out from the audio. */
+  const [beatBusy, setBeatBusy] = useState<string | null>(null);
+  const analyzeFileInto = useCallback(
+    async (id: string, buf: AudioBuffer) => {
+      setBeatBusy("Finding BPM and key…");
+      await sleep(30);
+      try {
+        const res = await analyzeBeat(buf);
+        if (res) {
+          update(id, (x) => {
+            const next: Project = { ...x };
+            if (res.bpm) {
+              next.autoBpm = { bpm: res.bpm, from: "audio", downbeat: res.downbeat };
+              if (!x.tempo || x.tempo.source === "auto") next.tempo = { bpm: res.bpm, downbeat: res.downbeat, beatsPerBar: 4, source: "auto" };
+            }
+            if (res.key) {
+              next.autoKey = { ...res.key, from: "audio" };
+              if (!x.key || x.key.source === "auto") next.key = { ...res.key, source: "auto" };
+            }
+            return next;
+          });
+          flash([res.bpm && `${res.bpm} BPM`, res.key && `key ${keyName(res.key)}`].filter(Boolean).join(" · ") + " from the file");
+        } else flash("Beat loaded. Couldn't find a clear BPM, so tap it in.");
+      } finally {
+        setBeatBusy(null);
+      }
+    },
+    [update, flash]
+  );
+  const loadBeatFile = useCallback(
+    async (file: File) => {
+      if (!project) return;
+      if (!file.type.startsWith("audio/") && !/\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(file.name)) return flash("That isn't an audio file");
+      if (file.size > 200 * 1024 * 1024) return flash("That file is over 200 MB");
+      const id = project.id;
+      setBeatBusy("Loading the beat…");
+      let buf: AudioBuffer;
+      try {
+        buf = await decodeFile(file);
+      } catch {
+        setBeatBusy(null);
+        return flash("Couldn't read that audio file. Try an MP3 or WAV.");
+      }
+      await saveBeat({ projectId: id, name: file.name, mime: file.type || "audio/mpeg", blob: file });
+      update(id, (p) => ({
+        ...p,
+        title: p.title === "Untitled song" ? titleFromFile(file.name) : p.title,
+        url: "",
+        videoId: "",
+        beat: { name: file.name, duration: buf.duration, size: file.size },
+        autoBpm: null,
+        autoKey: null,
+        tempo: p.tempo?.source === "manual" ? p.tempo : undefined,
+        key: p.key?.source === "manual" ? p.key : undefined,
+      }));
+      await analyzeFileInto(id, buf);
+    },
+    [project, update, flash, analyzeFileInto]
+  );
+  /** Re-run detection on the stored beat file (the Find button for file songs). */
+  const reanalyzeBeat = useCallback(async () => {
+    if (!project?.beat) return;
+    const b = await getBeat(project.id).catch(() => null);
+    if (!b) return flash("The beat file is missing on this device");
+    setBeatBusy("Finding BPM and key…");
+    try {
+      await analyzeFileInto(project.id, await decodeFile(b.blob));
+    } catch {
+      setBeatBusy(null);
+      flash("Couldn't read the beat file");
+    }
+  }, [project, flash, analyzeFileInto]);
+  const beatInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const removeBeatFile = useCallback(async () => {
+    if (!project?.beat) return;
+    if (!confirm(`Remove the beat file "${project.beat.name}" from this song? Your lyrics and takes stay.`)) return;
+    await deleteBeat(project.id).catch(() => {});
+    update(project.id, (p) => {
+      const { beat, ...rest } = p;
+      return rest;
+    });
+  }, [project, update]);
 
   /* ---------- active marker + follow ---------- */
   const times = useMemo(() => markers.map((m) => m.time), [markers]);
@@ -985,14 +1207,20 @@ export default function App() {
   const songTakes = useMemo(() => {
     const byMarker = new Map<string, Take>();
     for (const t of takes) {
+      if (t.layerOf) continue;
       if (!markers.some((m) => m.id === t.markerId)) continue;
       const cur = byMarker.get(t.markerId);
       if (!cur || (t.starred && !cur.starred) || (!cur.starred && t.createdAt > cur.createdAt)) byMarker.set(t.markerId, t);
     }
     return [...byMarker.values()].sort((a, b) => a.start - b.start);
   }, [takes, markers]);
-  const songTakesRef = useRef(songTakes);
-  songTakesRef.current = songTakes;
+  /** Keeper takes plus the layers recorded over them. */
+  const songClips = useMemo(() => {
+    const ids = new Set(songTakes.map((t) => t.id));
+    return [...songTakes, ...takes.filter((t) => t.layerOf && ids.has(t.layerOf))].sort((a, b) => a.start - b.start);
+  }, [songTakes, takes]);
+  const songTakesRef = useRef(songClips);
+  songTakesRef.current = songClips;
   const songTakeIds = useMemo(() => new Map(songTakes.map((t) => [t.markerId, t.id])), [songTakes]);
 
   const [songMode, setSongMode] = useState(false);
@@ -1030,7 +1258,7 @@ export default function App() {
     const t = window.setInterval(() => {
       const playing = isPlaying();
       const now = estimateNow() + prefs.nudgeMs / 1000;
-      const live = new Set(songTakes.map((x) => x.id));
+      const live = new Set(songClips.map((x) => x.id));
       for (const [id, a] of songAudios.current) {
         if (!live.has(id)) {
           a.audio.pause();
@@ -1038,7 +1266,7 @@ export default function App() {
           songAudios.current.delete(id);
         }
       }
-      for (const take of songTakes) {
+      for (const take of songClips) {
         const rel = now - take.start;
         let a = songAudios.current.get(take.id);
         const inside = playing && rel >= 0 && rel < take.duration - 0.05;
@@ -1049,6 +1277,7 @@ export default function App() {
         if (!a) {
           const url = URL.createObjectURL(take.blob);
           a = { audio: new Audio(url), url };
+          liveFx.current.set(take.id, routeAudio(a.audio, take.fx));
           songAudios.current.set(take.id, a);
         }
         if (a.audio.paused) {
@@ -1060,11 +1289,124 @@ export default function App() {
       }
     }, 30);
     return () => window.clearInterval(t);
-  }, [songMode, songTakes, prefs.nudgeMs]);
+  }, [songMode, songClips, prefs.nudgeMs]);
   useEffect(() => {
     if (rec || playingTakeId) stopSong();
   }, [rec, playingTakeId, stopSong]);
   useEffect(() => stopSong, [currentId, stopSong]);
+
+  /* ---------- A/B: two takes in sync, flip between them ---------- */
+  const [compare, setCompare] = useState<{ markerId: string; a: string; b: string; side: "a" | "b"; playing: boolean } | null>(null);
+  const compareRef = useRef(compare);
+  compareRef.current = compare;
+  const compareAudios = useRef<{ a: HTMLAudioElement; b: HTMLAudioElement; urls: string[] } | null>(null);
+  const compareTokenRef = useRef(0);
+  const stopCompareAudio = useCallback(() => {
+    compareTokenRef.current++;
+    const c = compareAudios.current;
+    if (c) {
+      c.a.pause();
+      c.b.pause();
+      c.urls.forEach((u) => URL.revokeObjectURL(u));
+    }
+    compareAudios.current = null;
+    liveFx.current.clear();
+  }, []);
+  const openCompare = useCallback(
+    (m: Marker) => {
+      const bases = takesRef.current.filter((t) => t.markerId === m.id && !t.layerOf);
+      if (bases.length < 2) return;
+      const starred = bases.find((t) => t.starred);
+      const newest = [...bases].reverse();
+      const a = starred ?? newest[1];
+      const b = newest.find((t) => t.id !== a.id)!;
+      stopTake();
+      stopSong();
+      setCompare({ markerId: m.id, a: a.id, b: b.id, side: "a", playing: false });
+    },
+    [stopTake, stopSong]
+  );
+  const closeCompare = useCallback(() => {
+    stopCompareAudio();
+    if (compareRef.current?.playing) {
+      playerRef.current?.pauseVideo();
+      setBeatMuted(false);
+    }
+    setCompare(null);
+  }, [stopCompareAudio, setBeatMuted]);
+  const playCompare = useCallback(async () => {
+    const c = compareRef.current;
+    if (!c) return;
+    if (c.playing) {
+      stopCompareAudio();
+      playerRef.current?.pauseVideo();
+      setBeatMuted(false);
+      return setCompare({ ...c, playing: false });
+    }
+    const ta = takesRef.current.find((t) => t.id === c.a);
+    const tb = takesRef.current.find((t) => t.id === c.b);
+    if (!ta || !tb || !playerRef.current) return;
+    stopTake();
+    stopCompareAudio();
+    const token = ++compareTokenRef.current;
+    const alive = () => compareTokenRef.current === token;
+    const mk = (t: Take) => {
+      const url = URL.createObjectURL(t.blob);
+      const el = new Audio(url);
+      el.preload = "auto";
+      liveFx.current.set(t.id, routeAudio(el, t.fx));
+      return { el, url };
+    };
+    const A = mk(ta);
+    const B = mk(tb);
+    A.el.muted = c.side !== "a";
+    B.el.muted = c.side !== "b";
+    compareAudios.current = { a: A.el, b: B.el, urls: [A.url, B.url] };
+    let ended = 0;
+    const onEnd = () => {
+      if (++ended < 2 || !alive()) return;
+      stopCompareAudio();
+      playerRef.current?.pauseVideo();
+      setBeatMuted(false);
+      setCompare((x) => x && { ...x, playing: false });
+    };
+    A.el.onended = onEnd;
+    B.el.onended = onEnd;
+    setCompare({ ...c, playing: true });
+    setBeatMuted(!takeBeatRef.current);
+    const ok = await rollFrom(Math.min(ta.start, tb.start), alive);
+    if (!ok || !alive()) return;
+    startInSync(A.el, ta.start, alive);
+    startInSync(B.el, tb.start, alive);
+  }, [stopTake, stopCompareAudio, setBeatMuted, rollFrom, startInSync]);
+  const flipCompare = useCallback((side?: "a" | "b") => {
+    const c = compareRef.current;
+    if (!c) return;
+    const next = side ?? (c.side === "a" ? "b" : "a");
+    const au = compareAudios.current;
+    if (au) {
+      au.a.muted = next !== "a";
+      au.b.muted = next !== "b";
+    }
+    setCompare({ ...c, side: next });
+  }, []);
+  useEffect(() => {
+    if (compare && (rec || playingTakeId || songMode)) closeCompare();
+  }, [rec, playingTakeId, songMode]);
+  useEffect(() => closeCompare, [currentId]);
+  // The beat stopping ends the comparison playback.
+  useEffect(() => {
+    if (!playing && compare?.playing) {
+      const t = window.setTimeout(() => {
+        if (!isPlaying() && compareRef.current?.playing) {
+          stopCompareAudio();
+          setBeatMuted(false);
+          setCompare((x) => x && { ...x, playing: false });
+        }
+      }, 400);
+      return () => window.clearTimeout(t);
+    }
+  }, [playing, compare?.playing]);
 
   /* ---------- karaoke / backing track ---------- */
   const [backingDraft, setBackingDraft] = useState("");
@@ -1416,6 +1758,43 @@ export default function App() {
       flash("Couldn't copy automatically. Select the code and copy it.");
     }
   }, [project, flash]);
+  const copyLink = useCallback(async () => {
+    if (!project) return;
+    const code = await songCode([project]);
+    const link = `${location.origin}${location.pathname}#s=${code.slice("INKBEAT1:".length)}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      flash(project.beat ? "Link copied. Your beat file isn't in the link, so they'll need to upload it." : "Link copied. Whoever opens it gets a copy of this song.");
+    } catch {
+      setPasteDraft(link);
+      setPasteOpen(true);
+      flash("Couldn't copy automatically. Select the link and copy it.");
+    }
+  }, [project, flash]);
+  // Opening a share link: offer to add the song.
+  useEffect(() => {
+    if (!loaded) return;
+    const take = async () => {
+      const h = window.location.hash;
+      if (!h.startsWith("#s=")) return;
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      try {
+        const added = await importSongCode("INKBEAT1:" + h.slice(3), new Set(projectsRef.current.map((p) => p.id)));
+        added.forEach((p) => savedRef.current.set(p.id, p));
+        setProjects((ps) => [...added, ...ps]);
+        if (added[0]) {
+          setCurrentId(added[0].id);
+          setViewState("song");
+          flash(`Opened "${added[0].title}" from a shared link. It's saved in your songs.`);
+        }
+      } catch (e: any) {
+        flash(e?.message || "That link didn't work");
+      }
+    };
+    take();
+    window.addEventListener("hashchange", take);
+    return () => window.removeEventListener("hashchange", take);
+  }, [loaded, flash]);
   const doPasteCode = useCallback(async () => {
     try {
       const added = await importSongCode(pasteDraft, new Set(projectsRef.current.map((p) => p.id)));
@@ -1449,6 +1828,16 @@ export default function App() {
         return;
       }
       if (typing || e.metaKey || e.ctrlKey || e.altKey || viewRef.current === "home") return;
+      if (compareRef.current && (e.key === "Tab" || e.key === "a" || e.key === "A" || e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        flipCompare(e.key === "Tab" ? undefined : (e.key.toLowerCase() as "a" | "b"));
+        return;
+      }
+      if (compareRef.current && e.key === " ") {
+        e.preventDefault();
+        playCompare();
+        return;
+      }
       if (performingRef.current && e.key !== " ") return;
       if ((e.key === "p" || e.key === "P") && punchRef.current) {
         e.preventDefault();
@@ -1477,7 +1866,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dropAtPlayhead, togglePlay, seek, rec, finishRecording, startRecording, activeId, markers]);
+  }, [dropAtPlayhead, togglePlay, seek, rec, finishRecording, startRecording, activeId, markers, flipCompare, playCompare]);
 
   const addTyped = () => {
     const t = parseTime(stampDraft);
@@ -1540,7 +1929,7 @@ export default function App() {
                 <span className="song-title">{p.title || "Untitled song"}</span>
                 <span className="song-meta">
                   {p.markers.length} marker{p.markers.length === 1 ? "" : "s"}
-                  {p.videoId ? "" : " · no beat"}
+                  {hasBeat(p) ? "" : " · no beat"}
                 </span>
               </button>
               <button className="song-del" title="Delete song" aria-label={`Delete ${p.title}`} onClick={() => removeProject(p)}>
@@ -1556,6 +1945,12 @@ export default function App() {
             onChange={(v) => setPrefs((p) => ({ ...p, splash: v }))}
             label="Startup animation"
             title="Play the record animation when the site opens"
+          />
+          <Switch
+            on={prefs.pitch}
+            onChange={(v) => setPrefs((p) => ({ ...p, pitch: v }))}
+            label="Pitch line"
+            title="While recording, show the note you're singing against the song's key"
           />
           {!standalone && installEvt && (
             <button
@@ -1596,6 +1991,9 @@ export default function App() {
             <button onClick={() => setPasteOpen(true)} title="Paste a song code to add that song">
               Paste code
             </button>
+            <button onClick={copyLink} disabled={!project} title="Copy a link that opens this song for whoever clicks it (lyrics, timing, links; no recordings or beat files)">
+              Share link
+            </button>
           </div>
           <input
             ref={fileRef}
@@ -1619,7 +2017,7 @@ export default function App() {
           </button>
           <Home
             currentTitle={project?.title ?? null}
-            songCount={projects.filter((p) => p.videoId || p.markers.length).length}
+            songCount={projects.filter((p) => hasBeat(p) || p.markers.length).length}
             onOpen={() => setView("song")}
             onNew={createProject}
           />
@@ -1655,8 +2053,13 @@ export default function App() {
                 </button>
               )}
               {songTakes.length > 0 && (
-                <button className="export-vox" onClick={exportVocals} disabled={exporting} title="Mix your keeper takes into one WAV file that lines up with the beat">
+                <button className="export-vox" onClick={() => exportVocals(false)} disabled={exporting} title="Mix your keeper takes into one WAV file that lines up with the beat">
                   {exporting ? "Mixing…" : "Export vocals"}
+                </button>
+              )}
+              {songTakes.length > 0 && project.beat && (
+                <button className="export-vox mix" onClick={() => exportVocals(true)} disabled={exporting} title="Your keeper takes mixed over your beat file, as one WAV">
+                  {exporting ? "Mixing…" : "Export full mix"}
                 </button>
               )}
               {songTakes.length > 0 && (
@@ -1676,6 +2079,7 @@ export default function App() {
                     ["notes", "Notes"],
                     ["rhymes", "Rhymes"],
                     ["history", "History"],
+                    ["spark", "Stuck?"],
                   ] as const
                 ).map(([k, label]) => (
                   <button key={k} className={drawer === k ? "on" : ""} onClick={() => toggleDrawer(k)} aria-pressed={drawer === k}>
@@ -1683,7 +2087,24 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {project.videoId && (
+              {hasBeat(project) && (
+                <div className="beat-swap">
+                  {project.beat ? (
+                    <span className="beat-name" title={project.beat.name}>
+                      ♪ {project.beat.name}
+                    </span>
+                  ) : null}
+                  <button onClick={() => beatInputRef.current?.click()} title="Use an audio file from your computer as the beat">
+                    {project.beat ? "Swap file" : "Upload beat file"}
+                  </button>
+                  {project.beat && (
+                    <button onClick={removeBeatFile} className="danger" title="Remove the beat file from this song">
+                      Remove
+                    </button>
+                  )}
+                </div>
+              )}
+              {hasBeat(project) && (
                 <form
                   className="relink"
                   onSubmit={(e) => {
@@ -1694,7 +2115,7 @@ export default function App() {
                   <input
                     value={linkDraft}
                     onChange={(e) => setLinkDraft(e.target.value)}
-                    placeholder="Swap video: paste a YouTube link"
+                    placeholder={project.beat ? "Or use a YouTube link instead" : "Swap video: paste a YouTube link"}
                     aria-label="Swap YouTube link"
                   />
                 </form>
@@ -1702,17 +2123,50 @@ export default function App() {
             </header>
 
             <section className="deck">
-              <div className="screen">
+              <div
+                className={`screen ${dragOver ? "drag" : ""} ${project.beat && !usingBacking ? "file" : ""}`}
+                onDragOver={(e) => {
+                  if (e.dataTransfer.types.includes("Files")) {
+                    e.preventDefault();
+                    setDragOver(true);
+                  }
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) loadBeatFile(f);
+                }}
+              >
                 <div ref={hostRef} className="yt-host" />
-                {project.videoId && playerError && (
+                {project.beat && !usingBacking && <BeatWave peaks={beatPeaks} name={project.beat.name} />}
+                {beatBusy && <div className="beat-busy">{beatBusy}</div>}
+                {dragOver && <div className="drop-hint">Drop the beat file</div>}
+                {hasBeat(project) && playerError && (
                   <div className="player-error" role="alert">
                     <p>{playerError}</p>
-                    <a href={`https://www.youtube.com/watch?v=${project.videoId}`} target="_blank" rel="noreferrer">
-                      Open on YouTube
-                    </a>
+                    {project.videoId ? (
+                      <a href={`https://www.youtube.com/watch?v=${project.videoId}`} target="_blank" rel="noreferrer">
+                        Open on YouTube
+                      </a>
+                    ) : (
+                      <button onClick={() => beatInputRef.current?.click()}>Upload the file again</button>
+                    )}
                   </div>
                 )}
-                {!project.videoId && (
+                <input
+                  ref={beatInputRef}
+                  type="file"
+                  accept={BEAT_TYPES}
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) loadBeatFile(f);
+                  }}
+                />
+                {!hasBeat(project) && (
                   <form
                     className="paste"
                     onSubmit={(e) => {
@@ -1732,6 +2186,13 @@ export default function App() {
                       />
                       <button type="submit">Load</button>
                     </div>
+                    <div className="paste-or">
+                      <span>or</span>
+                      <button type="button" className="upload-btn" onClick={() => beatInputRef.current?.click()}>
+                        Upload a beat file
+                      </button>
+                      <small>MP3, WAV, M4A… or drag it here. Lets you export the full mix, and BPM/key are found straight from the file.</small>
+                    </div>
                   </form>
                 )}
               </div>
@@ -1747,7 +2208,7 @@ export default function App() {
                     +5
                   </button>
                 </div>
-                <button className="drop" onClick={dropAtPlayhead} disabled={!ready || !project.videoId}>
+                <button className="drop" onClick={dropAtPlayhead} disabled={!ready || !hasBeat(project)}>
                   Drop marker <kbd>M</kbd>
                 </button>
                 <form
@@ -1852,10 +2313,10 @@ export default function App() {
                     </p>
                   )}
                   <div className="tempo-find">
-                    <button onClick={() => project && runAutoBpm(project, true)} disabled={!!bpmBusy || !project.videoId} title="Check the video name, the description, and (for covers) a song database">
+                    <button onClick={() => project && (project.beat ? reanalyzeBeat() : runAutoBpm(project, true))} disabled={!!bpmBusy || !!beatBusy || !hasBeat(project)} title="Check the video name, the description, and (for covers) a song database">
                       Find BPM &amp; key
                     </button>
-                    {canListen && (
+                    {canListen && !project.beat && (
                       <button onClick={listenForBpm} disabled={!!bpmBusy || !ready} title="Listen to the beat for 12 seconds and work out the BPM from the sound (Chrome: pick this tab and share its audio)">
                         Listen
                       </button>
@@ -1888,7 +2349,7 @@ export default function App() {
                           : "Then pause right on a “1” (where a bar starts) and press Set bar start here."}
                   </p>
                 </div>
-                <button className="cover-btn" onClick={() => setCoverOpen(true)} disabled={!project.videoId}>
+                <button className="cover-btn" onClick={() => setCoverOpen(true)} disabled={!hasBeat(project)}>
                   Cover / parody <small>pull lyrics</small>
                 </button>
                 <div className="prefs">
@@ -1933,8 +2394,9 @@ export default function App() {
               </div>
             </section>
 
-            {project.videoId && (
+            {hasBeat(project) && (
               <Timeline
+                peaks={beatPeaks}
                 markers={markers}
                 takes={takes}
                 activeId={activeId}
@@ -2056,6 +2518,11 @@ export default function App() {
                     }}
                     onDelete={() => removeMarker(m)}
                     onRecord={() => startRecording(m)}
+                    onLayer={(t) => startRecording(m, t)}
+                    layeringOver={rec?.markerId === m.id ? layerOver : null}
+                    onFx={changeFx}
+                    onCompare={() => openCompare(m)}
+                    bpm={project.tempo?.bpm}
                     onPlayTake={playTake}
                     withBeat={takeBeat}
                     showOriginal={project.cover?.showOriginal ?? true}
@@ -2083,6 +2550,69 @@ export default function App() {
                 ))
               )}
             </section>
+
+            {((rec?.phase === "recording" || punch?.phase === "recording") && prefs.pitch && micStream) && (
+              <div className="pitch-dock">
+                <PitchLine stream={micStream} songKey={songKey ? { tonic: songKey.tonic, mode: songKey.mode } : null} />
+              </div>
+            )}
+            {compare && (() => {
+              const cm = markers.find((x) => x.id === compare.markerId);
+              const bases = takes.filter((t) => t.markerId === compare.markerId && !t.layerOf);
+              const ta = bases.find((t) => t.id === compare.a);
+              const tb = bases.find((t) => t.id === compare.b);
+              const pickSel = (side: "a" | "b", val: string) => (
+                <select
+                  value={val}
+                  onChange={(e) => {
+                    stopCompareAudio();
+                    if (compare.playing) playerRef.current?.pauseVideo();
+                    setCompare({ ...compare, [side]: e.target.value, playing: false });
+                  }}
+                  aria-label={`Take ${side.toUpperCase()}`}
+                >
+                  {bases.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              );
+              return (
+                <div className="ab-bar" role="region" aria-label="Compare takes">
+                  <div className="ab-title">
+                    A/B <span>{cm?.label || (cm ? fmt(cm.time) : "")}</span>
+                  </div>
+                  <button className="ab-play" onClick={playCompare} aria-label={compare.playing ? "Stop" : "Play both"}>
+                    {compare.playing ? "■" : "▶"}
+                  </button>
+                  <div className={`ab-side ${compare.side === "a" ? "on" : ""}`}>
+                    <button onClick={() => flipCompare("a")} aria-pressed={compare.side === "a"}>
+                      A
+                    </button>
+                    {pickSel("a", compare.a)}
+                    <button className="ab-keep" onClick={() => ta && !ta.starred && starTake(ta)} disabled={!ta || ta.starred}>
+                      {ta?.starred ? "★ keeper" : "Keep A"}
+                    </button>
+                  </div>
+                  <button className="ab-flip" onClick={() => flipCompare()} title="Flip between A and B (Tab)">
+                    ⇄ <kbd>Tab</kbd>
+                  </button>
+                  <div className={`ab-side ${compare.side === "b" ? "on" : ""}`}>
+                    <button onClick={() => flipCompare("b")} aria-pressed={compare.side === "b"}>
+                      B
+                    </button>
+                    {pickSel("b", compare.b)}
+                    <button className="ab-keep" onClick={() => tb && !tb.starred && starTake(tb)} disabled={!tb || tb.starred}>
+                      {tb?.starred ? "★ keeper" : "Keep B"}
+                    </button>
+                  </div>
+                  <button className="ab-x" onClick={closeCompare} aria-label="Close compare">
+                    ×
+                  </button>
+                </div>
+              );
+            })()}
 
             <footer className="keys">
               <span>
@@ -2165,6 +2695,21 @@ export default function App() {
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+/** What shows in the screen for a beat file: big waveform with a moving playhead. */
+function BeatWave({ peaks, name }: { peaks: Float32Array | null; name: string }) {
+  const head = useClock((s) => (s.duration ? Math.round((s.now / s.duration) * 1000) / 10 : 0));
+  return (
+    <div className="beatwave">
+      <div className="beatwave-name">♪ {name}</div>
+      <div className="beatwave-wave">
+        {peaks ? <Wave peaks={peaks} className="bigwave" /> : <span className="beatwave-wait">drawing waveform…</span>}
+        <div className="beatwave-played" style={{ width: `${head}%` }} />
+        <div className="beatwave-head" style={{ left: `${head}%` }} />
+      </div>
     </div>
   );
 }

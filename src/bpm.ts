@@ -194,6 +194,39 @@ export async function detectFromStream(
   const frames = ctx.sampleRate / hop; // onset frames per second
   await ctx.close();
 
+  const tp = tempoFromEnergy(full, lowE, frames);
+  if (!tp) return null;
+  const { bpm, barPhase } = tp;
+  const LATENCY = 0.045; // measured: script-processor timing lands ~45ms late
+  const downbeat = songStart + barPhase / frames - LATENCY;
+  return { bpm, downbeat: Math.max(0, Math.round(downbeat * 1000) / 1000), key, chroma };
+}
+
+/** Asks Chrome to share this tab's audio. Returns null if the user cancels or no audio was shared. */
+export async function captureTabAudio(): Promise<MediaStream | null> {
+  const md: any = navigator.mediaDevices;
+  if (!md?.getDisplayMedia) return null;
+  const stream: MediaStream = await md.getDisplayMedia({
+    video: true,
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    preferCurrentTab: true,
+    selfBrowserSurface: "include",
+    systemAudio: "include",
+  });
+  if (!stream.getAudioTracks().length) {
+    stream.getTracks().forEach((t) => t.stop());
+    return null;
+  }
+  return stream; // caller stops all tracks when done (stopping video early can end the share)
+}
+
+/**
+ * Tempo and bar phase from per-hop energies (whole band + kick band).
+ * `frames` = hops per second. Returns the BPM and the bar start, in hops from the first hop.
+ */
+export function tempoFromEnergy(full: number[], lowE: number[], frames: number): { bpm: number; barPhase: number } | null {
+  const n = Math.min(full.length, lowE.length);
+  if (n < 200) return null;
   // Onset strength: rectified log-energy rise, kick band weighted up.
   const onset = new Float32Array(n);
   for (let i = 1; i < n; i++) {
@@ -260,25 +293,5 @@ export async function detectFromStream(
       barPhase = phase + k * period;
     }
   }
-  const LATENCY = 0.045; // measured: script-processor timing lands ~45ms late
-  const downbeat = songStart + barPhase / frames - LATENCY;
-  return { bpm, downbeat: Math.max(0, Math.round(downbeat * 1000) / 1000), key, chroma };
-}
-
-/** Asks Chrome to share this tab's audio. Returns null if the user cancels or no audio was shared. */
-export async function captureTabAudio(): Promise<MediaStream | null> {
-  const md: any = navigator.mediaDevices;
-  if (!md?.getDisplayMedia) return null;
-  const stream: MediaStream = await md.getDisplayMedia({
-    video: true,
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    preferCurrentTab: true,
-    selfBrowserSurface: "include",
-    systemAudio: "include",
-  });
-  if (!stream.getAudioTracks().length) {
-    stream.getTracks().forEach((t) => t.stop());
-    return null;
-  }
-  return stream; // caller stops all tracks when done (stopping video early can end the share)
+  return { bpm, barPhase };
 }
