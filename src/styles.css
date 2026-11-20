@@ -677,3 +677,14 @@ kbd {
 .karaoke .cover-remove:hover { color: var(--rec); }
 .brand-mark { display: block; border-radius: 8px; transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
 .brand:hover .brand-mark { transform: rotate(-8deg) scale(1.06); }
+
+/* Backup */
+.backup { display: flex; flex-direction: column; gap: 8px; padding: 12px 6px 0; border-top: 1px solid var(--edge); }
+.backup-lbl { font-size: 11px; font-family: var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: 0.1em; }
+.backup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.backup-grid button {
+  background: var(--desk-3); border: 1px solid var(--edge); border-radius: 6px; padding: 7px 6px;
+  font-size: 12px; font-weight: 500; transition: border-color 0.2s, transform 0.12s;
+}
+.backup-grid button:hover:not(:disabled) { border-color: var(--tape); }
+.backup-grid button:active:not(:disabled) { transform: scale(0.96); }

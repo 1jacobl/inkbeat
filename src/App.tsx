@@ -15,6 +15,7 @@ import { YTPlayer, loadYouTubeAPI, parseStartParam, parseVideoId } from "./youtu
 import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, useClock } from "./clock";
 import { Segmented, Stepper, Switch } from "./ui";
 import logo from "./logo.svg";
+import { exportBackup, exportLyricsText, importBackup } from "./backup";
 import { fmt, parseTime, uid } from "./time";
 import Timeline from "./Timeline";
 import MarkerBlock from "./MarkerBlock";
@@ -834,6 +835,43 @@ export default function App() {
     ? `https://www.youtube.com/results?search_query=${encodeURIComponent(`${project.cover.track} ${project.cover.artist} karaoke instrumental`)}`
     : `https://www.youtube.com/results?search_query=${encodeURIComponent(`${project?.title ?? ""} karaoke instrumental`)}`;
 
+  /* ---------- backup ---------- */
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busyBackup, setBusyBackup] = useState(false);
+  const doExport = useCallback(
+    async (all: boolean) => {
+      if (!project) return;
+      setBusyBackup(true);
+      try {
+        await exportBackup(all ? projectsRef.current : [project]);
+        flash(all ? "Backup of all songs downloaded" : "Song backup downloaded");
+      } catch {
+        flash("Export failed");
+      } finally {
+        setBusyBackup(false);
+      }
+    },
+    [project, flash]
+  );
+  const doImport = useCallback(
+    async (file: File) => {
+      setBusyBackup(true);
+      try {
+        const res = await importBackup(file, new Set(projectsRef.current.map((p) => p.id)));
+        res.projects.forEach((p) => savedRef.current.set(p.id, p));
+        setProjects((ps) => [...res.projects, ...ps]);
+        if (res.projects[0]) switchProject(res.projects[0].id);
+        flash(`Imported ${res.projects.length} song${res.projects.length === 1 ? "" : "s"} and ${res.takes} take${res.takes === 1 ? "" : "s"}`);
+      } catch (e: any) {
+        flash(e?.message || "Import failed");
+      } finally {
+        setBusyBackup(false);
+        if (fileRef.current) fileRef.current.value = "";
+      }
+    },
+    [switchProject, flash]
+  );
+
   /* ---------- keyboard ---------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -907,8 +945,32 @@ export default function App() {
             </div>
           ))}
         </nav>
+        <div className="backup">
+          <span className="backup-lbl">Backup</span>
+          <div className="backup-grid">
+            <button onClick={() => doExport(false)} disabled={busyBackup || !project} title="Download this song with its lyrics and takes">
+              Export song
+            </button>
+            <button onClick={() => doExport(true)} disabled={busyBackup} title="Download every song with lyrics and takes">
+              Export all
+            </button>
+            <button onClick={() => fileRef.current?.click()} disabled={busyBackup} title="Add songs from an Inkbeat backup file">
+              Import
+            </button>
+            <button onClick={() => project && exportLyricsText(project)} disabled={!project} title="Download this song's lyrics as a text file">
+              Lyrics .txt
+            </button>
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,application/json"
+            hidden
+            onChange={(e) => e.target.files?.[0] && doImport(e.target.files[0])}
+          />
+        </div>
         <div className="rail-foot">
-          Saved on this device.
+          Saved in this browser. Export to move songs to another device.
           <br />
           Use headphones when recording.
         </div>
