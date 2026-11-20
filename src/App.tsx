@@ -13,7 +13,8 @@ import {
 } from "./db";
 import { YTPlayer, loadYouTubeAPI, parseStartParam, parseVideoId } from "./youtube";
 import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, useClock } from "./clock";
-import { Segmented, Stepper, Switch } from "./ui";
+import { KeyPicker, Segmented, Stepper, Switch } from "./ui";
+import { keyInText, keyName, relative, scaleNotes } from "./key";
 import logo from "./logo.svg";
 import Home from "./Home";
 import Perform from "./Perform";
@@ -22,7 +23,7 @@ import { Snapshot, listSnapshots, saveSnapshot, setStorageBlockedHandler } from 
 import { mixTakes, splicePunch } from "./audio";
 import { captureTabAudio, detectFromStream, findBpm } from "./bpm";
 import { bpmFromTitle, countIn, makeTapper, metronome, snapToBeat } from "./metronome";
-import { exportBackup, exportLyricsText, importBackup } from "./backup";
+import { exportBackup, exportLyricsText, importBackup, importSongCode, songCode } from "./backup";
 import { fmt, parseTime, uid } from "./time";
 import Timeline from "./Timeline";
 import MarkerBlock from "./MarkerBlock";
@@ -1265,13 +1266,18 @@ export default function App() {
       setBpmBusy("Looking for the BPM…");
       const title = (playerRef.current as any)?.getVideoData?.()?.title || p.title;
       const found = await findBpm({ videoTitle: title || "", videoId: p.videoId, cover: p.cover ? { track: p.cover.track, artist: p.cover.artist } : null });
+      const k = keyInText(title || "") ?? keyInText(p.title || "");
       setBpmBusy(null);
       update(p.id, (x) => {
         const next: Project = { ...x, autoBpm: found };
+        if (k) {
+          next.autoKey = { ...k, from: "video name" };
+          if (!x.key || x.key.source === "auto") next.key = { ...k, source: "auto" };
+        } else if (x.autoKey === undefined) next.autoKey = null;
         if (found && (!x.tempo || x.tempo.source === "auto")) next.tempo = { bpm: found.bpm, downbeat: x.tempo?.downbeat ?? 0, beatsPerBar: 4, source: "auto" };
         return next;
       });
-      if (found) flash(`Found ${found.bpm} BPM in the ${found.from}.`);
+      if (found || k) flash([found && `${found.bpm} BPM from the ${found.from}`, k && `key ${keyName(k)} from the video name`].filter(Boolean).join(" · "));
       else if (announce) flash("Couldn't find a BPM in the video name or description. Try Listen, or tap it.");
     },
     [update, flash]
@@ -1298,6 +1304,24 @@ export default function App() {
     flash(`Back to ${autoFound.bpm} BPM from the ${autoFound.from}`);
   }, [project, autoFound, update, flash]);
 
+  // Song key: auto (video name or listening) or set by you.
+  const songKey = project?.key ?? null;
+  const keyAuto = songKey?.source === "auto";
+  const [keyOverriding, setKeyOverriding] = useState(false);
+  useEffect(() => setKeyOverriding(false), [project?.id]);
+  const keyLocked = keyAuto && !keyOverriding;
+  const setKey = useCallback(
+    (k: { tonic: number; mode: "major" | "minor" } | null) =>
+      project && update(project.id, (p) => ({ ...p, key: k ? { ...k, source: "manual" } : undefined })),
+    [project, update]
+  );
+  const keyBackToAuto = useCallback(() => {
+    const a = project?.autoKey;
+    if (!project || !a) return;
+    update(project.id, (p) => ({ ...p, key: { tonic: a.tonic, mode: a.mode, source: "auto" } }));
+    setKeyOverriding(false);
+  }, [project, update]);
+
   // Listen: share this tab's audio for ~12s and work out the BPM and bar start from the sound.
   const canListen = typeof navigator !== "undefined" && !!(navigator.mediaDevices as any)?.getDisplayMedia;
   const listenForBpm = useCallback(async () => {
@@ -1320,14 +1344,51 @@ export default function App() {
       );
       if (!res) return flash("Couldn't hear a clear beat. Make sure it's playing with the volume up.");
       const found = { bpm: res.bpm, from: "audio" as const, downbeat: res.downbeat };
-      update(p.id, (x) => ({ ...x, autoBpm: found, tempo: { bpm: res.bpm, downbeat: res.downbeat, beatsPerBar: 4, source: "auto" } }));
+      update(p.id, (x) => ({
+        ...x,
+        autoBpm: found,
+        tempo: { bpm: res.bpm, downbeat: res.downbeat, beatsPerBar: 4, source: "auto" },
+        ...(res.key
+          ? { autoKey: { ...res.key, from: "audio" as const }, key: x.key?.source === "manual" ? x.key : { ...res.key, source: "auto" as const } }
+          : {}),
+      }));
       setOverriding(false);
-      flash(`Heard ${res.bpm} BPM. Bar start set to ${fmt(res.downbeat, true)}.`);
+      setKeyOverriding(false);
+      flash(`Heard ${res.bpm} BPM${res.key ? `, key ${keyName(res.key)}` : ""}. Bar start set to ${fmt(res.downbeat, true)}.`);
     } finally {
       stream.getTracks().forEach((t) => t.stop());
       setBpmBusy(null);
     }
   }, [project, update, flash]);
+
+  /* ---------- song codes ---------- */
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteDraft, setPasteDraft] = useState("");
+  const copyCode = useCallback(async () => {
+    if (!project) return;
+    const code = await songCode([project]);
+    try {
+      await navigator.clipboard.writeText(code);
+      flash(`Song code copied (${code.length.toLocaleString()} characters). Paste it anywhere, then use Paste code to load it. Recordings aren't included.`);
+    } catch {
+      setPasteDraft(code);
+      setPasteOpen(true);
+      flash("Couldn't copy automatically. Select the code and copy it.");
+    }
+  }, [project, flash]);
+  const doPasteCode = useCallback(async () => {
+    try {
+      const added = await importSongCode(pasteDraft, new Set(projectsRef.current.map((p) => p.id)));
+      added.forEach((p) => savedRef.current.set(p.id, p));
+      setProjects((ps) => [...added, ...ps]);
+      if (added[0]) switchProject(added[0].id);
+      setPasteOpen(false);
+      setPasteDraft("");
+      flash(`Added ${added.length === 1 ? `"${added[0].title}"` : `${added.length} songs`}`);
+    } catch (e: any) {
+      flash(e?.message || "That code didn't work");
+    }
+  }, [pasteDraft, switchProject, flash]);
 
   /* ---------- keyboard ---------- */
   const viewRef = useRef(view);
@@ -1488,6 +1549,12 @@ export default function App() {
             </button>
             <button onClick={() => project && exportLyricsText(project)} disabled={!project} title="Download this song's lyrics as a text file">
               Lyrics .txt
+            </button>
+            <button onClick={copyCode} disabled={!project} title="Copy this song as a code you can paste anywhere (lyrics, timing, links; no recordings)">
+              Copy code
+            </button>
+            <button onClick={() => setPasteOpen(true)} title="Paste a song code to add that song">
+              Paste code
             </button>
           </div>
           <input
@@ -1688,6 +1755,22 @@ export default function App() {
                       format={(v) => (v ? `${v} BPM` : "– BPM")}
                       onChange={(v) => setTempo(v > 0 ? { bpm: tempo ? v : Math.max(v, 60) } : null)}
                     />
+                    <div className="halfdouble">
+                      <button
+                        onClick={() => tempo && setTempo({ bpm: tempo.bpm / 2 })}
+                        disabled={tempoLocked || !tempo}
+                        title="Half speed (if the BPM came out double)"
+                      >
+                        ½
+                      </button>
+                      <button
+                        onClick={() => tempo && setTempo({ bpm: tempo.bpm * 2 })}
+                        disabled={tempoLocked || !tempo}
+                        title="Double speed (common with trap beats read at half time)"
+                      >
+                        ×2
+                      </button>
+                    </div>
                     <button className="tap" onClick={tapTempo} disabled={tempoLocked} title="Tap along with the beat to measure its BPM">
                       {tapCount > 0 ? `Tap ${tapCount}` : "Tap tempo"}
                     </button>
@@ -1700,9 +1783,37 @@ export default function App() {
                   >
                     Set bar start here <span>{fmt(Math.max(0, tempo?.downbeat ?? 0), true)}</span>
                   </button>
+                  <div className="key-row">
+                    <span className="tempo-title">Key</span>
+                    {songKey && (
+                      <span className={`tempo-mode ${keyAuto ? "auto" : "manual"}`}>
+                        {keyAuto ? `Auto · from ${project.autoKey?.from ?? "video name"}` : "Manual"}
+                      </span>
+                    )}
+                    <KeyPicker
+                      value={songKey}
+                      label={songKey ? keyName(songKey) : "Set key"}
+                      disabled={keyLocked}
+                      onChange={setKey}
+                    />
+                    {keyLocked ? (
+                      <button className="tempo-act" onClick={() => setKeyOverriding(true)}>
+                        Override
+                      </button>
+                    ) : songKey && !keyAuto && project.autoKey ? (
+                      <button className="tempo-act" onClick={keyBackToAuto}>
+                        Back to auto ({keyName(project.autoKey)})
+                      </button>
+                    ) : null}
+                  </div>
+                  {songKey && (
+                    <p className="key-notes">
+                      Notes: <b>{scaleNotes(songKey).join(" ")}</b> · same notes as {keyName(relative(songKey))}
+                    </p>
+                  )}
                   <div className="tempo-find">
                     <button onClick={() => project && runAutoBpm(project, true)} disabled={!!bpmBusy || !project.videoId} title="Check the video name, the description, and (for covers) a song database">
-                      Find BPM
+                      Find BPM &amp; key
                     </button>
                     {canListen && (
                       <button onClick={listenForBpm} disabled={!!bpmBusy || !ready} title="Listen to the beat for 12 seconds and work out the BPM from the sound (Chrome: pick this tab and share its audio)">
@@ -1962,6 +2073,22 @@ export default function App() {
           historyKey={historyKey}
           flash={flash}
         />
+      )}
+
+      {pasteOpen && (
+        <div className="paste-code" role="dialog" aria-label="Paste a song code" onMouseDown={(e) => e.target === e.currentTarget && setPasteOpen(false)}>
+          <div className="paste-card">
+            <h3>Song code</h3>
+            <p>Paste a code that starts with INKBEAT1: and press Add song. Codes carry lyrics, sections, timing and video links (no recordings).</p>
+            <textarea value={pasteDraft} onChange={(e) => setPasteDraft(e.target.value)} placeholder="INKBEAT1:…" autoFocus spellCheck={false} />
+            <div className="paste-actions">
+              <button onClick={() => setPasteOpen(false)}>Cancel</button>
+              <button className="go" onClick={doPasteCode} disabled={!pasteDraft.trim()}>
+                Add song
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {performing && project && (
