@@ -675,7 +675,7 @@ kbd {
 }
 .karaoke .cover-remove { background: none; border: 0; color: var(--faint); font-size: 12px; padding: 4px 6px; }
 .karaoke .cover-remove:hover { color: var(--rec); }
-.brand-mark { display: block; border-radius: 8px; transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
+.brand-mark { display: block; border-radius: 8px; box-shadow: 0 4px 14px rgba(246, 214, 74, 0.18); transition: transform 0.3s cubic-bezier(0.3, 1.6, 0.5, 1); }
 .brand:hover .brand-mark { transform: rotate(-8deg) scale(1.06); }
 
 /* Backup */
