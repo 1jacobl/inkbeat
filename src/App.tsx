@@ -1231,9 +1231,14 @@ export default function App() {
   useEffect(() => () => metronome.stop(), []);
   const tapper = useMemo(() => makeTapper(), []);
   const tapFirstRef = useRef<number | null>(null);
+  const [tapCount, setTapCount] = useState(0);
+  const tapResetRef = useRef<number | undefined>(undefined);
   const tapTempo = useCallback(() => {
     metronome.unlock();
     const r = tapper.tap();
+    setTapCount(r.count);
+    window.clearTimeout(tapResetRef.current);
+    tapResetRef.current = window.setTimeout(() => setTapCount(0), 2200);
     if (r.first) tapFirstRef.current = isPlaying() ? estimateNow() : null;
     if (r.bpm) setTempo({ bpm: r.bpm, ...(tapFirstRef.current !== null ? { downbeat: tapFirstRef.current } : {}) });
   }, [tapper, setTempo]);
@@ -1556,26 +1561,53 @@ export default function App() {
                   />
                   <button type="submit">Add</button>
                 </form>
-                <div className="tempo">
-                  <Stepper
-                    label="Tempo"
-                    title="Beats per minute. Click the number to clear it."
-                    value={tempo?.bpm ?? 0}
-                    step={1}
-                    format={(v) => (v ? `${v} BPM` : "– BPM")}
-                    onChange={(v) => setTempo(v > 0 ? { bpm: tempo ? v : Math.max(v, 60) } : null)}
-                  />
-                  <button className="tap" onClick={tapTempo} title="Tap along with the beat (4+ taps). Start tapping on beat 1 to line up the bars.">
-                    Tap
-                  </button>
+                <div className="tempo-box">
+                  <div className="tempo-head">
+                    <span className="tempo-title">Tempo</span>
+                    <span className="tempo-sub">for the metronome &amp; bar lines</span>
+                  </div>
+                  <div className="tempo">
+                    <Stepper
+                      label="Tempo"
+                      title="Beats per minute. Click the number to clear it."
+                      value={tempo?.bpm ?? 0}
+                      step={1}
+                      format={(v) => (v ? `${v} BPM` : "– BPM")}
+                      onChange={(v) => setTempo(v > 0 ? { bpm: tempo ? v : Math.max(v, 60) } : null)}
+                    />
+                    <button className="tap" onClick={tapTempo} title="Tap along with the beat to measure its BPM">
+                      {tapCount > 0 ? `Tap ${tapCount}` : "Tap tempo"}
+                    </button>
+                  </div>
                   <button
-                    className="tap"
+                    className="bar-start"
                     onClick={() => setTempo({ downbeat: Math.round(estimateNow() * 1000) / 1000, ...(tempo ? {} : { bpm: 90 }) })}
                     disabled={!ready}
-                    title="Mark the playhead as beat 1 of a bar"
+                    title="Pause on a strong '1' (like where the drums hit) and press this"
                   >
-                    Beat 1
+                    Set bar start here <span>{fmt(Math.max(0, tempo?.downbeat ?? 0), true)}</span>
                   </button>
+                  <div className="tempo-metro">
+                    <Switch
+                      on={prefs.metronome}
+                      onChange={(v) => {
+                        metronome.unlock();
+                        setPrefs((p) => ({ ...p, metronome: v }));
+                        if (v && !tempo) flash("Set a BPM first: type it, tap along, or put it in the title");
+                      }}
+                      label="Metronome"
+                      title="Click track while the beat plays"
+                    />
+                  </div>
+                  <p className="tempo-hint">
+                    {tapCount > 0 && tapCount < 3
+                      ? "Keep tapping on every beat…"
+                      : tapCount >= 3
+                        ? `Got it: ${tempo?.bpm ?? "…"} BPM. Tap more to fine-tune.`
+                        : !tempo
+                          ? "Play the beat and press Tap tempo on every beat (4+ taps), or type the BPM."
+                          : "Then pause right on a “1” (where a bar starts) and press Set bar start here."}
+                  </p>
                 </div>
                 <button className="cover-btn" onClick={() => setCoverOpen(true)} disabled={!project.videoId}>
                   Cover / parody <small>pull lyrics</small>
@@ -1607,16 +1639,7 @@ export default function App() {
                     />
                   </div>
                   <div className="pref-row">
-                    <Switch
-                      on={prefs.metronome}
-                      onChange={(v) => {
-                        metronome.unlock();
-                        setPrefs((p) => ({ ...p, metronome: v }));
-                        if (v && !tempo) flash("Set a BPM first: type it, tap along, or put it in the title");
-                      }}
-                      label="Metronome"
-                      title="Click track while the beat plays"
-                    />
+
                     <Switch on={prefs.countIn} onChange={(v) => setPrefs((p) => ({ ...p, countIn: v }))} label="Count-in" title="Four clicks before recording starts" />
                     <Switch on={prefs.snap} onChange={(v) => setPrefs((p) => ({ ...p, snap: v }))} label="Snap" title="New and dragged markers land on the nearest beat (needs a BPM)" />
                     <Switch on={prefs.follow} onChange={(v) => setPrefs((p) => ({ ...p, follow: v }))} label="Follow" title="Scroll to the section that's playing" />

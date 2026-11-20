@@ -943,3 +943,15 @@ kbd {
 .install-btn { background: var(--hi); color: var(--ink); border: 0; border-radius: 6px; padding: 7px 10px; font-weight: 800; font-size: 12px; }
 .install-hint { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
 .install-hint b { color: var(--chalk); }
+.tempo-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--edge); border-radius: 8px; background: rgba(0, 0, 0, 0.15); }
+.tempo-head { display: flex; align-items: baseline; gap: 8px; }
+.tempo-title { font-weight: 800; font-size: 13px; }
+.tempo-sub { font-size: 11px; color: var(--faint); }
+.tempo .tap { min-width: 84px; }
+.bar-start { display: flex; justify-content: space-between; align-items: center; background: var(--desk-3); border: 1px solid var(--edge); border-radius: 7px; padding: 6px 10px; font-size: 12px; font-weight: 700; transition: border-color 0.2s, transform 0.08s; }
+.bar-start span { font-family: var(--mono); font-weight: 500; color: var(--dim); }
+.bar-start:hover:not(:disabled) { border-color: var(--tape); }
+.bar-start:active:not(:disabled) { transform: scale(0.97); }
+.tempo-hint { margin: 0; font-size: 11px; line-height: 1.4; color: var(--dim); }
+.tempo-metro { display: flex; }
+.tempo-metro .switch { font-size: 13px; }
