@@ -1396,9 +1396,12 @@ export default function App() {
           </p>
         )}
         {bootIssue === "slow" && (
-          <p className="boot-msg">
-            Still loading your songs… If this doesn't finish, close any other Inkbeat tabs and reload (Ctrl/⌘ + Shift + R).
-          </p>
+          <>
+            <p className="boot-msg">
+              Still loading your songs… If this doesn't finish, close any other Inkbeat tabs and reload (Ctrl/⌘ + Shift + R).
+            </p>
+            <BootDiagnostics />
+          </>
         )}
         {bootIssue === "error" && (
           <p className="boot-msg">
@@ -2033,4 +2036,69 @@ function BeatLight() {
     return () => metronome.onBeat(null);
   }, []);
   return <span ref={ref} className="beat-light" aria-hidden />;
+}
+
+/** Shown when loading hangs: checks storage directly so we can see where it's stuck. */
+function BootDiagnostics() {
+  const [lines, setLines] = useState<string[]>([]);
+  const [copied, setCopied] = useState(false);
+  const run = useCallback(async () => {
+    const out: string[] = [`page: ${location.href}`, `browser: ${navigator.userAgent}`];
+    out.push(`indexedDB: ${typeof indexedDB === "undefined" ? "missing" : "present"}`);
+    try {
+      const dbs = await (indexedDB as any).databases?.();
+      out.push(`databases: ${dbs ? JSON.stringify(dbs.map((d: any) => `${d.name}@v${d.version}`)) : "n/a"}`);
+    } catch (e: any) {
+      out.push(`databases: error ${e?.name || e}`);
+    }
+    try {
+      const est = await navigator.storage?.estimate?.();
+      if (est) out.push(`storage: ${Math.round((est.usage || 0) / 1024)} KB used of ${Math.round((est.quota || 0) / 1048576)} MB`);
+    } catch {}
+    // Try a fresh open with a timeout to see what happens.
+    const res = await new Promise<string>((resolve) => {
+      const t = setTimeout(() => resolve("open: still pending after 5s"), 5000);
+      try {
+        const r = indexedDB.open("inkbeat");
+        r.onblocked = () => resolve("open: BLOCKED by another tab");
+        r.onerror = () => {
+          clearTimeout(t);
+          resolve(`open: error ${r.error?.name}: ${r.error?.message}`);
+        };
+        r.onsuccess = () => {
+          clearTimeout(t);
+          const db = r.result;
+          resolve(`open: ok v${db.version}, stores ${JSON.stringify([...db.objectStoreNames])}`);
+          db.close();
+        };
+      } catch (e: any) {
+        clearTimeout(t);
+        resolve(`open: threw ${e?.name}: ${e?.message}`);
+      }
+    });
+    out.push(res);
+    setLines(out);
+  }, []);
+  useEffect(() => {
+    run();
+  }, [run]);
+  return (
+    <div className="boot-diag">
+      <div className="boot-diag-btns">
+        <button onClick={() => location.reload()}>Try again</button>
+        <button
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(lines.join("\n"));
+              setCopied(true);
+            } catch {}
+          }}
+          disabled={!lines.length}
+        >
+          {copied ? "Copied" : "Copy details"}
+        </button>
+      </div>
+      <pre>{lines.length ? lines.join("\n") : "Checking storage…"}</pre>
+    </div>
+  );
 }
