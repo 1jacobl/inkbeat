@@ -967,3 +967,6 @@ kbd {
 .tempo-find button { background: var(--desk-3); border: 1px solid var(--edge); border-radius: 7px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
 .tempo-find button:hover:not(:disabled) { border-color: var(--tape); }
 .tempo-busy { font-size: 11px; color: var(--hi); font-family: var(--mono); }
+.boot { flex-direction: column; gap: 14px; text-align: center; padding: 16px; }
+.boot { display: flex; align-items: center; justify-content: center; }
+.boot-msg { max-width: 420px; margin: 0; font-size: 15px; font-weight: 500; line-height: 1.5; color: var(--chalk); letter-spacing: 0; }

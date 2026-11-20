@@ -18,7 +18,7 @@ import logo from "./logo.svg";
 import Home from "./Home";
 import Perform from "./Perform";
 import Drawer, { DrawerTab } from "./Drawer";
-import { Snapshot, listSnapshots, saveSnapshot } from "./db";
+import { Snapshot, listSnapshots, saveSnapshot, setStorageBlockedHandler } from "./db";
 import { mixTakes, splicePunch } from "./audio";
 import { captureTabAudio, detectFromStream, findBpm } from "./bpm";
 import { bpmFromTitle, countIn, makeTapper, metronome, snapToBeat } from "./metronome";
@@ -141,9 +141,22 @@ export default function App() {
   }, []);
 
   /* ---------- load + persist ---------- */
+  const [bootIssue, setBootIssue] = useState<null | "blocked" | "slow" | "error">(null);
   useEffect(() => {
+    setStorageBlockedHandler(() => setBootIssue("blocked"));
+    const slow = window.setTimeout(() => setBootIssue((b) => b ?? "slow"), 6000);
     (async () => {
-      const ps = await initialProjects();
+      let ps: Project[];
+      try {
+        ps = await initialProjects();
+      } catch {
+        initialLoad = null;
+        setBootIssue("error");
+        return;
+      } finally {
+        window.clearTimeout(slow);
+      }
+      setBootIssue(null);
       ps.forEach((p) => savedRef.current.set(p.id, p));
       setProjects(ps);
       const last = localStorage.getItem(LAST_KEY);
@@ -1372,7 +1385,29 @@ export default function App() {
     setStampDraft("");
   };
 
-  if (!loaded) return <div className="boot">Inkbeat</div>;
+  if (!loaded)
+    return (
+      <div className="boot">
+        <span>Inkbeat</span>
+        {bootIssue === "blocked" && (
+          <p className="boot-msg">
+            Inkbeat is open in another tab or window with an older version. Close the other Inkbeat tabs and this will finish
+            loading by itself.
+          </p>
+        )}
+        {bootIssue === "slow" && (
+          <p className="boot-msg">
+            Still loading your songs… If this doesn't finish, close any other Inkbeat tabs and reload (Ctrl/⌘ + Shift + R).
+          </p>
+        )}
+        {bootIssue === "error" && (
+          <p className="boot-msg">
+            Couldn't open your saved songs. Private/incognito windows and some browser settings block storage. Try a normal
+            window, then reload.
+          </p>
+        )}
+      </div>
+    );
 
   return (
     <div className={`app ${drawer && view === "song" ? "with-drawer" : ""}`}>

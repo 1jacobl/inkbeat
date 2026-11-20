@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 /* Small custom controls so settings match the app instead of the OS defaults. */
 
 export function Switch({
@@ -96,6 +97,80 @@ export function Stepper({
       <button type="button" disabled={disabled} onClick={() => onChange(round(value + step))} aria-label={`${label} up`}>
         +
       </button>
+    </div>
+  );
+}
+
+const NOTE_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/** Key picker: a button that opens a small grid of the 12 notes plus major/minor. */
+export function KeyPicker({
+  value,
+  label,
+  disabled,
+  onChange,
+}: {
+  value: { tonic: number; mode: "major" | "minor" } | null;
+  label: string;
+  disabled?: boolean;
+  onChange: (k: { tonic: number; mode: "major" | "minor" } | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+  const mode = value?.mode ?? "minor";
+  return (
+    <div className="keypick" ref={ref}>
+      <button type="button" className="keypick-btn" disabled={disabled} onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        {label}
+        <span aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="keypick-pop" role="dialog" aria-label="Choose key">
+          <Segmented
+            label="Major or minor"
+            value={mode}
+            options={[
+              { value: "major", label: "Major" },
+              { value: "minor", label: "Minor" },
+            ]}
+            onChange={(m) => onChange({ tonic: value?.tonic ?? 0, mode: m })}
+          />
+          <div className="keypick-grid">
+            {NOTE_SHARP.map((n, i) => (
+              <button
+                key={n}
+                type="button"
+                className={value?.tonic === i ? "on" : ""}
+                onClick={() => {
+                  onChange({ tonic: i, mode });
+                  setOpen(false);
+                }}
+              >
+                {n}
+                {mode === "minor" ? "m" : ""}
+              </button>
+            ))}
+          </div>
+          {value && (
+            <button
+              type="button"
+              className="keypick-clear"
+              onClick={() => {
+                onChange(null);
+                setOpen(false);
+              }}
+            >
+              Clear key
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

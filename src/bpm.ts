@@ -1,5 +1,6 @@
 /* Finding a song's BPM without an API key: video name, video description, a music database, or by listening. */
 import { bpmFromTitle } from "./metronome";
+import { SongKey, addChroma, keyFromChroma } from "./key";
 
 export type BpmSource = "video name" | "description" | "song database" | "audio";
 export interface FoundBpm {
@@ -120,7 +121,7 @@ export async function detectFromStream(
   seconds: number,
   songAt: (ctxTime: number, ctx: AudioContext) => number,
   onProgress?: (p: number) => void
-): Promise<{ bpm: number; downbeat: number } | null> {
+): Promise<{ bpm: number; downbeat: number; key: SongKey | null; chroma: number[] } | null> {
   const ctx = new AudioContext();
   await ctx.resume();
   const src = ctx.createMediaStreamSource(stream);
@@ -137,6 +138,18 @@ export async function detectFromStream(
   procFull.connect(mute);
   procLow.connect(mute);
   mute.connect(ctx.destination);
+
+  // Pitch content for the key: sample the spectrum ~10x a second.
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 8192;
+  analyser.smoothingTimeConstant = 0;
+  src.connect(analyser);
+  const spec = new Float32Array(analyser.frequencyBinCount);
+  const chroma = new Array(12).fill(0);
+  const chromaTimer = setInterval(() => {
+    analyser.getFloatFrequencyData(spec);
+    addChroma(chroma, spec, ctx.sampleRate, analyser.fftSize);
+  }, 100);
 
   const full: number[] = [];
   const lowE: number[] = [];
@@ -165,9 +178,12 @@ export async function detectFromStream(
       }
     }, 100);
   });
+  clearInterval(chromaTimer);
   procFull.disconnect();
   procLow.disconnect();
   src.disconnect();
+  const keyRes = keyFromChroma(chroma);
+  const key = keyRes && keyRes.confidence > 0.02 ? keyRes.key : null;
 
   const n = Math.min(full.length, lowE.length);
   if (n < 200 || t0 < 0) {
@@ -246,7 +262,7 @@ export async function detectFromStream(
   }
   const LATENCY = 0.045; // measured: script-processor timing lands ~45ms late
   const downbeat = songStart + barPhase / frames - LATENCY;
-  return { bpm, downbeat: Math.max(0, Math.round(downbeat * 1000) / 1000) };
+  return { bpm, downbeat: Math.max(0, Math.round(downbeat * 1000) / 1000), key, chroma };
 }
 
 /** Asks Chrome to share this tab's audio. Returns null if the user cancels or no audio was shared. */

@@ -107,3 +107,64 @@ export function exportLyricsText(p: Project): void {
   }
   download(`${slug(p.title)}-lyrics.txt`, new Blob([out.join("\n")], { type: "text/plain" }));
 }
+
+/* ---------------- Song codes: copy/paste text instead of files (no recordings) ---------------- */
+const CODE_PREFIX = "INKBEAT1:";
+
+function toB64Url(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromB64Url(s: string): Uint8Array {
+  const b = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+  const out = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
+  return out;
+}
+async function pipe(data: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
+  const res = new Response(new Blob([data]).stream().pipeThrough(stream));
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/** A pasteable code for songs: lyrics, sections, timing, tempo/key, video links. No audio. */
+export async function songCode(projects: Project[]): Promise<string> {
+  const slim = projects.map(({ id, title, url, videoId, markers, cover, backing, source, tempo, notes, ...rest }) => ({
+    id, title, url, videoId, markers, cover, backing, source, tempo, notes,
+    key: (rest as any).key,
+  }));
+  const json = new TextEncoder().encode(JSON.stringify({ v: 1, projects: slim }));
+  const packed = typeof CompressionStream !== "undefined" ? await pipe(json, new CompressionStream("gzip")) : json;
+  return CODE_PREFIX + (typeof CompressionStream !== "undefined" ? "z" : "j") + toB64Url(packed);
+}
+
+/** Adds the songs in a code. Existing songs are never overwritten (a clash comes in as a copy). */
+export async function importSongCode(code: string, existingIds: Set<string>): Promise<Project[]> {
+  const t = code.trim().replace(/\s+/g, "");
+  if (!t.startsWith(CODE_PREFIX)) throw new Error("That doesn't look like an Inkbeat code.");
+  const kind = t[CODE_PREFIX.length];
+  let bytes = fromB64Url(t.slice(CODE_PREFIX.length + 1));
+  if (kind === "z") bytes = await pipe(bytes, new DecompressionStream("gzip"));
+  let data: any;
+  try {
+    data = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("That code is incomplete. Copy the whole thing and try again.");
+  }
+  const added: Project[] = [];
+  for (const p of data.projects ?? []) {
+    const clash = existingIds.has(p.id);
+    const now = Date.now();
+    const project: Project = {
+      ...p,
+      id: clash ? uid() : p.id,
+      title: clash ? `${p.title} (pasted)` : p.title,
+      markers: Array.isArray(p.markers) ? p.markers : [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await saveProject(project);
+    added.push(project);
+  }
+  return added;
+}

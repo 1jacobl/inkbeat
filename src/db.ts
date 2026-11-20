@@ -26,6 +26,9 @@ export interface Project {
   source?: "main" | "backing";
   /** Beat grid for the metronome, bar lines and snapping. */
   tempo?: { bpm: number; downbeat: number; beatsPerBar: number; source?: "auto" | "manual" };
+  /** Song key; auto = found by the app, manual = set by you. */
+  key?: { tonic: number; mode: "major" | "minor"; source: "auto" | "manual" };
+  autoKey?: { tonic: number; mode: "major" | "minor"; from: "video name" | "audio" } | null;
   /** What the automatic lookup found (null = looked, found nothing; undefined = not looked yet). */
   autoBpm?: { bpm: number; from: "video name" | "description" | "song database" | "audio"; downbeat?: number } | null;
   /** Free-form scratchpad for ideas, unused bars, references. */
@@ -53,9 +56,16 @@ const DB_NAME = "inkbeat";
 const DB_VERSION = 2;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+/** Set when another open Inkbeat tab is holding up a storage upgrade. */
+export let onStorageBlocked: (() => void) | null = null;
+export function setStorageBlockedHandler(fn: (() => void) | null) {
+  onStorageBlocked = fn;
+}
+
 function open(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") return reject(new Error("no-indexeddb"));
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -69,8 +79,21 @@ function open(): Promise<IDBDatabase> {
         h.createIndex("projectId", "projectId");
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    // Another tab still has the old version open: tell the user instead of hanging.
+    req.onblocked = () => onStorageBlocked?.();
+    req.onsuccess = () => {
+      const db = req.result;
+      // If a newer version of Inkbeat opens in another tab, step aside so it can upgrade.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error);
+    };
   });
   return dbPromise;
 }
