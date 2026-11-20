@@ -16,6 +16,11 @@ import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, u
 import { Segmented, Stepper, Switch } from "./ui";
 import logo from "./logo.svg";
 import Home from "./Home";
+import Perform from "./Perform";
+import Drawer, { DrawerTab } from "./Drawer";
+import { Snapshot, listSnapshots, saveSnapshot } from "./db";
+import { mixTakes, splicePunch } from "./audio";
+import { bpmFromTitle, countIn, makeTapper, metronome, snapToBeat } from "./metronome";
 import { exportBackup, exportLyricsText, importBackup } from "./backup";
 import { fmt, parseTime, uid } from "./time";
 import Timeline from "./Timeline";
@@ -32,10 +37,13 @@ interface Prefs {
   follow: boolean; // auto-scroll the sheet to the active marker
   showMeter: boolean; // syllable counts + rhyme colors
   splash: boolean; // startup animation when the site opens
+  metronome: boolean; // click track while the beat plays (needs a BPM)
+  countIn: boolean; // four clicks before recording starts
+  snap: boolean; // markers snap to the nearest beat
 }
 
 function loadPrefs(): Prefs {
-  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true, splash: true };
+  const d: Prefs = { leadIn: 0, nudgeMs: 0, follow: true, showMeter: true, splash: true, metronome: false, countIn: true, snap: false };
   try {
     return { ...d, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") };
   } catch {
@@ -85,6 +93,8 @@ export default function App() {
   const [playingTakeId, setPlayingTakeId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
   const [linkDraft, setLinkDraft] = useState("");
   const [stampDraft, setStampDraft] = useState("");
   const [focusMarkerId, setFocusMarkerId] = useState<string | null>(null);
@@ -341,8 +351,10 @@ export default function App() {
 
   const dropAtPlayhead = useCallback(() => {
     if (!playerRef.current) return flash("Load a beat first");
-    addMarker(estimateNow());
-  }, [addMarker, flash]);
+    const t = estimateNow();
+    const tp = project?.tempo;
+    addMarker(prefsRef.current.snap && tp?.bpm ? snapToBeat(t, tp) : t);
+  }, [addMarker, flash, project?.tempo]);
 
   const changeMarker = useCallback(
     (id: string, patch: Partial<Marker>) => {
@@ -534,6 +546,11 @@ export default function App() {
         setTakes((ts) => [...ts, take]);
       };
 
+      if (prefs.countIn) {
+        metronome.unlock();
+        await countIn(project.tempo?.bpm || 100, project.tempo?.beatsPerBar || 4);
+        if (!alive()) return;
+      }
       // Start the mic first so nothing at the marker gets clipped, then roll the beat.
       // Once the beat is steady, work out which beat time lines up with the take's first sample.
       const target = Math.max(0, m.time - prefs.leadIn);
@@ -563,7 +580,7 @@ export default function App() {
         recorderRef.current.startBeat = Math.round((estimateNow() - (performance.now() - t0) / 1000) * 1000) / 1000;
       }
     },
-    [project, rec, finishRecording, stopTake, getStream, rollFrom, prefs.leadIn, flash]
+    [project, rec, finishRecording, stopTake, getStream, rollFrom, prefs.leadIn, prefs.countIn, flash]
   );
   const takesRef = useRef(takes);
   takesRef.current = takes;
@@ -583,6 +600,161 @@ export default function App() {
 
   // Release the mic when leaving.
   useEffect(() => () => streamRef.current?.getTracks().forEach((t) => t.stop()), []);
+
+  /* ---------- punch-in: re-record part of a take ---------- */
+  // Flow: Punch -> the beat and the take play from the take's start -> press "Punch in" (or P) where you want
+  // to come in -> rap -> Stop. The new part replaces that stretch; the rest of the take stays. Saved as a new take.
+  const [punch, setPunch] = useState<{ takeId: string; phase: "arming" | "monitor" | "recording" | "saving" } | null>(null);
+  const punchRef = useRef<{
+    take: Take;
+    recorder: MediaRecorder;
+    chunks: Blob[];
+    t0: number;
+    recStart: number;
+    audio: HTMLAudioElement;
+    url: string;
+    punchIn: number | null;
+    token: number;
+  } | null>(null);
+  const punchTokenRef = useRef(0);
+
+  const cleanupPunch = useCallback(() => {
+    const p = punchRef.current;
+    if (p) {
+      p.audio.pause();
+      URL.revokeObjectURL(p.url);
+    }
+    punchRef.current = null;
+  }, []);
+
+  const stopPunch = useCallback(async () => {
+    const p = punchRef.current;
+    if (!p) return setPunch(null);
+    punchTokenRef.current++;
+    const punchOut = estimateNow();
+    playerRef.current?.pauseVideo();
+    p.audio.pause();
+    const done = new Promise<void>((r) => {
+      p.recorder.onstop = () => r();
+    });
+    if (p.recorder.state !== "inactive") p.recorder.stop();
+    await done;
+    const { take, chunks, recStart, punchIn } = p;
+    cleanupPunch();
+    if (punchIn === null || punchOut - punchIn < 0.2) {
+      setPunch(null);
+      if (punchIn === null) flash("Punch cancelled: you didn't punch in");
+      return;
+    }
+    setPunch({ takeId: take.id, phase: "saving" });
+    try {
+      const recBlob = new Blob(chunks, { type: p.recorder.mimeType || "audio/webm" });
+      const { blob, duration } = await splicePunch(take.blob, take.start, recBlob, recStart, punchIn, punchOut);
+      const nt: Take = {
+        id: uid(),
+        projectId: take.projectId,
+        markerId: take.markerId,
+        name: `${take.name.replace(/ \(punch.*\)$/, "")} (punch)`,
+        start: take.start,
+        duration,
+        mime: "audio/wav",
+        blob,
+        createdAt: Date.now(),
+      };
+      await saveTake(nt);
+      setTakes((ts) => [...ts, nt]);
+      flash(`Saved "${nt.name}". The original take is still there.`);
+    } catch {
+      flash("Couldn't save the punch-in");
+    }
+    setPunch(null);
+  }, [cleanupPunch, flash]);
+
+  const startPunch = useCallback(
+    async (take: Take) => {
+      if (rec || punch || !playerRef.current) return;
+      stopTake();
+      const token = ++punchTokenRef.current;
+      const alive = () => punchTokenRef.current === token;
+      setPunch({ takeId: take.id, phase: "arming" });
+      let stream: MediaStream;
+      try {
+        stream = await getStream();
+      } catch {
+        setPunch(null);
+        return flash("Mic blocked. Allow microphone access in the address bar.");
+      }
+      const mime = pickMime();
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      await new Promise<void>((r) => {
+        recorder.onstart = () => r();
+        recorder.start(250);
+      });
+      const t0 = performance.now();
+      const url = URL.createObjectURL(take.blob);
+      const audio = new Audio(url);
+      punchRef.current = { take, recorder, chunks, t0, recStart: take.start, audio, url, punchIn: null, token };
+      setBeatMuted(!takeBeatRef.current);
+      const ok = await rollFrom(take.start, alive);
+      if (!ok || !alive()) {
+        if (alive()) {
+          recorder.stop();
+          cleanupPunch();
+          setPunch(null);
+          flash("Couldn't start the beat");
+        }
+        return;
+      }
+      audio.currentTime = Math.max(0, estimateNow() - take.start);
+      audio.play().catch(() => {});
+      audio.onended = () => alive() && punchRef.current?.punchIn === null && stopPunch();
+      setPunch({ takeId: take.id, phase: "monitor" });
+      await sleep(400);
+      if (alive() && punchRef.current) punchRef.current.recStart = estimateNow() - (performance.now() - t0) / 1000;
+    },
+    [rec, punch, stopTake, getStream, setBeatMuted, rollFrom, cleanupPunch, stopPunch, flash]
+  );
+
+  const punchIn = useCallback(() => {
+    const p = punchRef.current;
+    if (!p || p.punchIn !== null) return;
+    p.punchIn = estimateNow();
+    p.audio.volume = 0; // you hear yourself, not the old take, from here
+    setPunch({ takeId: p.take.id, phase: "recording" });
+  }, []);
+
+  // The beat stopping ends a punch too.
+  useEffect(() => {
+    if (!playing && (punch?.phase === "monitor" || punch?.phase === "recording")) {
+      const t = window.setTimeout(() => !isPlaying() && stopPunch(), 300);
+      return () => window.clearTimeout(t);
+    }
+  }, [playing, punch?.phase, stopPunch]);
+
+  /* ---------- export vocals ---------- */
+  const [exporting, setExporting] = useState(false);
+  const exportVocals = useCallback(async () => {
+    if (!project || !songTakesRef.current.length) return flash("Record a flow first");
+    setExporting(true);
+    try {
+      const blob = await mixTakes(songTakesRef.current);
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `${project.title.replace(/[^\w\- ]+/g, "").trim() || "song"} - vocals.wav`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+      flash("Vocals exported. The file starts at 0:00 so it lines up with the beat.");
+    } catch {
+      flash("Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }, [project, flash]);
 
   const renameTake = useCallback(async (take: Take, name: string) => {
     const next = { ...take, name };
@@ -812,6 +984,8 @@ export default function App() {
     }
     return [...byMarker.values()].sort((a, b) => a.start - b.start);
   }, [takes, markers]);
+  const songTakesRef = useRef(songTakes);
+  songTakesRef.current = songTakes;
   const songTakeIds = useMemo(() => new Map(songTakes.map((t) => [t.markerId, t.id])), [songTakes]);
 
   const [songMode, setSongMode] = useState(false);
@@ -948,6 +1122,136 @@ export default function App() {
     [switchProject, flash]
   );
 
+  /* ---------- install as an app ---------- */
+  const [installEvt, setInstallEvt] = useState<any>(null);
+  const standalone =
+    typeof window !== "undefined" &&
+    (window.matchMedia?.("(display-mode: standalone)").matches || (navigator as any).standalone === true);
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  useEffect(() => {
+    const on = (e: Event) => {
+      e.preventDefault();
+      setInstallEvt(e);
+    };
+    window.addEventListener("beforeinstallprompt", on);
+    window.addEventListener("appinstalled", () => setInstallEvt(null));
+    return () => window.removeEventListener("beforeinstallprompt", on);
+  }, []);
+
+  /* ---------- tools drawer: notes, rhymes, history ---------- */
+  const [drawer, setDrawer] = useState<DrawerTab | null>(null);
+  const [performing, setPerforming] = useState(false);
+  const performingRef = useRef(false);
+  performingRef.current = performing;
+  const [rhymeWord, setRhymeWord] = useState("");
+  const [historyKey, setHistoryKey] = useState(0);
+  const toggleDrawer = (t: DrawerTab) => setDrawer((d) => (d === t ? null : t));
+  const onSelectWord = useCallback((w: string) => {
+    setRhymeWord(w);
+  }, []);
+
+  // Auto-save a version of the lyrics ~20s after you stop typing, if anything changed.
+  const sig = (p: Project) => JSON.stringify([p.markers.map((m) => [m.id, m.label, m.lyrics]), p.notes ?? ""]);
+  const lastSigRef = useRef(new Map<string, string>());
+  const takeSnapshot = useCallback(async (p: Project, force = false) => {
+    const now = sig(p);
+    if (!lastSigRef.current.has(p.id)) {
+      const prev = (await listSnapshots(p.id))[0];
+      lastSigRef.current.set(p.id, prev ? JSON.stringify([prev.markers.map((m) => [m.id, m.label, m.lyrics]), prev.notes ?? ""]) : "");
+    }
+    if (!force && lastSigRef.current.get(p.id) === now) return;
+    const hasWords = p.markers.some((m) => m.lyrics.trim()) || (p.notes ?? "").trim();
+    if (!hasWords) return;
+    lastSigRef.current.set(p.id, now);
+    await saveSnapshot({
+      id: uid(),
+      projectId: p.id,
+      at: Date.now(),
+      markers: p.markers.map((m) => ({ id: m.id, time: m.time, label: m.label, lyrics: m.lyrics, original: m.original })),
+      notes: p.notes ?? "",
+    });
+    setHistoryKey((k) => k + 1);
+  }, []);
+  const lyricSig = project ? sig(project) : "";
+  useEffect(() => {
+    if (!project) return;
+    const p = project;
+    const t = window.setTimeout(() => takeSnapshot(p), 20000);
+    return () => window.clearTimeout(t);
+  }, [lyricSig]);
+  useEffect(() => {
+    // Save one when you leave a song too.
+    const p = project;
+    return () => {
+      if (p) takeSnapshot(projectsRef.current.find((x) => x.id === p.id) ?? p);
+    };
+  }, [project?.id]);
+
+  const restoreSnapshot = useCallback(
+    async (snap: Snapshot) => {
+      if (!project) return;
+      if (!confirm("Restore this version? Your current lyrics are saved to History first.")) return;
+      await takeSnapshot(project, true);
+      update(project.id, (p) => {
+        const byId = new Map(snap.markers.map((m) => [m.id, m]));
+        const markers = p.markers.map((m) => {
+          const s = byId.get(m.id);
+          return s ? { ...m, label: s.label, lyrics: s.lyrics } : m;
+        });
+        for (const s of snap.markers)
+          if (!p.markers.some((m) => m.id === s.id))
+            markers.push({ id: s.id, time: s.time, label: s.label, lyrics: s.lyrics, ...(s.original ? { original: s.original } : {}) });
+        return { ...p, markers: markers.sort((a, b) => a.time - b.time), notes: snap.notes };
+      });
+      lastSigRef.current.delete(project.id);
+      flash("Version restored");
+    },
+    [project, takeSnapshot, update, flash]
+  );
+
+  /* ---------- tempo + metronome ---------- */
+  const tempo = project?.tempo && project.tempo.bpm > 0 ? project.tempo : null;
+  const setTempo = useCallback(
+    (patch: Partial<{ bpm: number; downbeat: number; beatsPerBar: number }> | null) => {
+      if (!project) return;
+      update(project.id, (p) => {
+        if (!patch) return { ...p, tempo: undefined };
+        const cur = p.tempo ?? { bpm: 0, downbeat: 0, beatsPerBar: 4 };
+        const next = { ...cur, ...patch };
+        next.bpm = Math.max(0, Math.min(240, Math.round(next.bpm * 2) / 2));
+        return { ...p, tempo: next.bpm > 0 ? next : undefined };
+      });
+    },
+    [project, update]
+  );
+  useEffect(() => {
+    if (prefs.metronome && tempo && view === "song") metronome.start(tempo);
+    else metronome.stop();
+  }, [prefs.metronome, tempo?.bpm, tempo?.downbeat, tempo?.beatsPerBar, view]);
+  useEffect(() => () => metronome.stop(), []);
+  const tapper = useMemo(() => makeTapper(), []);
+  const tapFirstRef = useRef<number | null>(null);
+  const tapTempo = useCallback(() => {
+    metronome.unlock();
+    const r = tapper.tap();
+    if (r.first) tapFirstRef.current = isPlaying() ? estimateNow() : null;
+    if (r.bpm) setTempo({ bpm: r.bpm, ...(tapFirstRef.current !== null ? { downbeat: tapFirstRef.current } : {}) });
+  }, [tapper, setTempo]);
+  // "Find" the BPM: type beats usually say it in the title.
+  useEffect(() => {
+    if (!ready || !project || project.tempo) return;
+    const id = project.id;
+    const t = window.setTimeout(() => {
+      const title = (playerRef.current as any)?.getVideoData?.()?.title || project.title;
+      const bpm = bpmFromTitle(title || "");
+      if (bpm) {
+        update(id, (p) => (p.tempo ? p : { ...p, tempo: { bpm, downbeat: 0, beatsPerBar: 4 } }));
+        flash(`Found ${bpm} BPM in the title. Tap "Beat 1" on a downbeat to line up the click.`);
+      }
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, [ready, project?.id, project?.videoId, !!project?.tempo]);
+
   /* ---------- keyboard ---------- */
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -955,7 +1259,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.isContentEditable;
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && viewRef.current !== "home") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && viewRef.current !== "home" && !performingRef.current) {
         e.preventDefault();
         dropAtPlayhead();
         return;
@@ -963,12 +1267,21 @@ export default function App() {
       if (e.key === "Escape") {
         if (typing) target.blur();
         if (rec) finishRecording();
+        if (punchRef.current) stopPunch();
         return;
       }
       if (typing || e.metaKey || e.ctrlKey || e.altKey || viewRef.current === "home") return;
+      if (performingRef.current && e.key !== " ") return;
+      if ((e.key === "p" || e.key === "P") && punchRef.current) {
+        e.preventDefault();
+        if (punchRef.current.punchIn === null) punchIn();
+        else stopPunch();
+        return;
+      }
       if (e.key === " ") {
         e.preventDefault();
-        if (rec) finishRecording();
+        if (punchRef.current) stopPunch();
+        else if (rec) finishRecording();
         else togglePlay();
       } else if (e.key === "m" || e.key === "M") {
         e.preventDefault();
@@ -998,7 +1311,7 @@ export default function App() {
   if (!loaded) return <div className="boot">Inkbeat</div>;
 
   return (
-    <div className="app">
+    <div className={`app ${drawer && view === "song" ? "with-drawer" : ""}`}>
       <aside className={`rail ${navOpen ? "open" : ""}`}>
         <button
           className={`brand ${view === "home" ? "here" : ""}`}
@@ -1041,6 +1354,23 @@ export default function App() {
             label="Startup animation"
             title="Play the record animation when the site opens"
           />
+          {!standalone && installEvt && (
+            <button
+              className="install-btn"
+              onClick={async () => {
+                installEvt.prompt();
+                await installEvt.userChoice.catch(() => {});
+                setInstallEvt(null);
+              }}
+            >
+              Install app
+            </button>
+          )}
+          {!standalone && !installEvt && isIOS && (
+            <p className="install-hint">
+              Install on iPhone: tap <b>Share</b>, then <b>Add to Home Screen</b>.
+            </p>
+          )}
         </div>
         <div className="backup">
           <span className="backup-lbl">Backup</span>
@@ -1116,6 +1446,11 @@ export default function App() {
                 </button>
               )}
               {songTakes.length > 0 && (
+                <button className="export-vox" onClick={exportVocals} disabled={exporting} title="Mix your keeper takes into one WAV file that lines up with the beat">
+                  {exporting ? "Mixing…" : "Export vocals"}
+                </button>
+              )}
+              {songTakes.length > 0 && (
                 <Switch
                   on={takeBeat}
                   onChange={toggleTakeBeat}
@@ -1123,6 +1458,22 @@ export default function App() {
                   title="Hear the beat under your takes. Works live while takes or Play song are playing."
                 />
               )}
+              <button className="perform-btn" onClick={() => setPerforming(true)} disabled={!markers.some((m) => m.lyrics.trim())} title="Full-screen lyrics that scroll with the beat">
+                Perform
+              </button>
+              <div className="tool-btns">
+                {(
+                  [
+                    ["notes", "Notes"],
+                    ["rhymes", "Rhymes"],
+                    ["history", "History"],
+                  ] as const
+                ).map(([k, label]) => (
+                  <button key={k} className={drawer === k ? "on" : ""} onClick={() => toggleDrawer(k)} aria-pressed={drawer === k}>
+                    {label}
+                  </button>
+                ))}
+              </div>
               {project.videoId && (
                 <form
                   className="relink"
@@ -1205,6 +1556,27 @@ export default function App() {
                   />
                   <button type="submit">Add</button>
                 </form>
+                <div className="tempo">
+                  <Stepper
+                    label="Tempo"
+                    title="Beats per minute. Click the number to clear it."
+                    value={tempo?.bpm ?? 0}
+                    step={1}
+                    format={(v) => (v ? `${v} BPM` : "– BPM")}
+                    onChange={(v) => setTempo(v > 0 ? { bpm: tempo ? v : Math.max(v, 60) } : null)}
+                  />
+                  <button className="tap" onClick={tapTempo} title="Tap along with the beat (4+ taps). Start tapping on beat 1 to line up the bars.">
+                    Tap
+                  </button>
+                  <button
+                    className="tap"
+                    onClick={() => setTempo({ downbeat: Math.round(estimateNow() * 1000) / 1000, ...(tempo ? {} : { bpm: 90 }) })}
+                    disabled={!ready}
+                    title="Mark the playhead as beat 1 of a bar"
+                  >
+                    Beat 1
+                  </button>
+                </div>
                 <button className="cover-btn" onClick={() => setCoverOpen(true)} disabled={!project.videoId}>
                   Cover / parody <small>pull lyrics</small>
                 </button>
@@ -1235,6 +1607,18 @@ export default function App() {
                     />
                   </div>
                   <div className="pref-row">
+                    <Switch
+                      on={prefs.metronome}
+                      onChange={(v) => {
+                        metronome.unlock();
+                        setPrefs((p) => ({ ...p, metronome: v }));
+                        if (v && !tempo) flash("Set a BPM first: type it, tap along, or put it in the title");
+                      }}
+                      label="Metronome"
+                      title="Click track while the beat plays"
+                    />
+                    <Switch on={prefs.countIn} onChange={(v) => setPrefs((p) => ({ ...p, countIn: v }))} label="Count-in" title="Four clicks before recording starts" />
+                    <Switch on={prefs.snap} onChange={(v) => setPrefs((p) => ({ ...p, snap: v }))} label="Snap" title="New and dragged markers land on the nearest beat (needs a BPM)" />
                     <Switch on={prefs.follow} onChange={(v) => setPrefs((p) => ({ ...p, follow: v }))} label="Follow" title="Scroll to the section that's playing" />
                     <Switch
                       on={prefs.showMeter}
@@ -1253,7 +1637,8 @@ export default function App() {
                 takes={takes}
                 activeId={activeId}
                 onSeek={(t) => seek(t)}
-                onMoveMarker={moveMarker}
+                onMoveMarker={(id, t) => moveMarker(id, prefs.snap && tempo ? snapToBeat(t, tempo) : t)}
+                tempo={tempo}
                 recMarkerId={rec?.markerId ?? null}
                 loop={loop}
               />
@@ -1372,10 +1757,17 @@ export default function App() {
                     onRenameTake={renameTake}
                     onDeleteTake={removeTake}
                     onStarTake={starTake}
+                    punch={punch}
+                    onPunch={startPunch}
+                    onPunchIn={punchIn}
+                    onStopPunch={stopPunch}
                     songTakeId={songTakeIds.get(m.id) ?? null}
                     looping={loop?.markerId === m.id}
                     onLoop={() => toggleLoop(m, i)}
                     showMeter={prefs.showMeter}
+                    onSelectWord={(w) => {
+                      onSelectWord(w);
+                    }}
                   />
                 ))
               )}
@@ -1406,6 +1798,32 @@ export default function App() {
         )}
       </main>
 
+      {drawer && project && view === "song" && (
+        <Drawer
+          tab={drawer}
+          onTab={setDrawer}
+          onClose={() => setDrawer(null)}
+          project={project}
+          onNotes={(v) => update(project.id, (p) => ({ ...p, notes: v }))}
+          word={rhymeWord}
+          onWord={setRhymeWord}
+          onRestore={restoreSnapshot}
+          historyKey={historyKey}
+          flash={flash}
+        />
+      )}
+
+      {performing && project && (
+        <Perform
+          title={project.title}
+          markers={markers}
+          duration={playerRef.current?.getDuration() ? playerRef.current.getDuration() - getOffset() : 0}
+          onTogglePlay={togglePlay}
+          onSeek={(t) => seek(t, true)}
+          onClose={() => setPerforming(false)}
+        />
+      )}
+
       {coverOpen && project && (
         <CoverDialog
           initialQuery={project.title === "Untitled song" ? "" : project.title}
@@ -1431,6 +1849,7 @@ function Readout() {
     <div className="readout" aria-label="Playback time">
       <span className="now">{fmt(now / 10, true)}</span>
       <span className="dur">/ {fmt(dur)}</span>
+      <BeatLight />
     </div>
   );
 }
@@ -1451,4 +1870,19 @@ function PlayButton({ onClick, disabled }: { onClick: () => void; disabled: bool
       )}
     </button>
   );
+}
+
+/** Blinks on each metronome click; the first beat of a bar is red. */
+function BeatLight() {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    metronome.onBeat((b) => {
+      const el = ref.current;
+      if (!el) return;
+      el.classList.toggle("one", b === 0);
+      el.animate([{ opacity: 1, transform: "scale(1.25)" }, { opacity: 0.15, transform: "scale(1)" }], { duration: 220, easing: "ease-out" });
+    });
+    return () => metronome.onBeat(null);
+  }, []);
+  return <span ref={ref} className="beat-light" aria-hidden />;
 }

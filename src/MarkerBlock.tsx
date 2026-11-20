@@ -36,6 +36,11 @@ interface Props {
   looping: boolean;
   onLoop: () => void;
   showMeter: boolean;
+  onSelectWord: (w: string) => void;
+  punch: { takeId: string; phase: "arming" | "monitor" | "recording" | "saving" } | null;
+  onPunch: (t: Take) => void;
+  onPunchIn: () => void;
+  onStopPunch: () => void;
 }
 
 export default function MarkerBlock(p: Props) {
@@ -137,6 +142,7 @@ export default function MarkerBlock(p: Props) {
                 placeholder="Your version, line for line…"
                 label={`Lyrics at ${fmt(marker.time)}`}
                 showMeter={p.showMeter}
+                onSelectWord={p.onSelectWord}
               />
               {!marker.lyrics.trim() && (
                 <button
@@ -156,6 +162,7 @@ export default function MarkerBlock(p: Props) {
             placeholder="Write your bars here…"
             label={`Lyrics at ${fmt(marker.time)}`}
             showMeter={p.showMeter}
+            onSelectWord={p.onSelectWord}
           />
         )}
         {lines > 0 && <div className="bar-count">{lines} bar{lines === 1 ? "" : "s"}</div>}
@@ -187,6 +194,11 @@ export default function MarkerBlock(p: Props) {
                 playing={p.playingTakeId === t.id}
                 inSong={p.songTakeId === t.id}
                 onStar={() => p.onStarTake(t)}
+                punchPhase={p.punch?.takeId === t.id ? p.punch.phase : null}
+                punchBusy={!!p.punch && p.punch.takeId !== t.id}
+                onPunch={() => p.onPunch(t)}
+                onPunchIn={p.onPunchIn}
+                onStopPunch={p.onStopPunch}
                 onPlay={() => (p.playingTakeId === t.id ? p.onStopTake() : p.onPlayTake(t))}
                 onRename={(n) => p.onRenameTake(t, n)}
                 onDelete={() => p.onDeleteTake(t)}
@@ -223,11 +235,21 @@ function TakeChip({
   onDelete,
   inSong,
   onStar,
+  punchPhase,
+  punchBusy,
+  onPunch,
+  onPunchIn,
+  onStopPunch,
 }: {
   take: Take;
   playing: boolean;
   inSong: boolean;
   onStar: () => void;
+  punchPhase: "arming" | "monitor" | "recording" | "saving" | null;
+  punchBusy: boolean;
+  onPunch: () => void;
+  onPunchIn: () => void;
+  onStopPunch: () => void;
   onPlay: () => void;
   onRename: (n: string) => void;
   onDelete: () => void;
@@ -241,10 +263,10 @@ function TakeChip({
     return () => URL.revokeObjectURL(u);
   }, [take.blob]);
 
-  const ext = take.mime.includes("mp4") ? "m4a" : take.mime.includes("ogg") ? "ogg" : "webm";
+  const ext = take.mime.includes("wav") ? "wav" : take.mime.includes("mp4") ? "m4a" : take.mime.includes("ogg") ? "ogg" : "webm";
 
   return (
-    <li className={`take ${playing ? "playing" : ""} ${take.starred ? "starred" : ""}`}>
+    <li className={`take ${playing ? "playing" : ""} ${take.starred ? "starred" : ""} ${punchPhase ? "punching " + punchPhase : ""}`}>
       <button className="take-play" onClick={onPlay} aria-label={playing ? `Stop ${take.name}` : `Play ${take.name}`}>
         {playing ? "■" : "▶"}
       </button>
@@ -274,6 +296,26 @@ function TakeChip({
       <span className="take-meta">
         {fmt(take.duration)} @ {fmt(take.start)}
       </span>
+      {punchPhase === null ? (
+        <button
+          className="take-punch"
+          onClick={onPunch}
+          disabled={punchBusy}
+          title="Punch in: re-record just part of this take. The take plays; press Punch in (or P) where you want to come in."
+        >
+          punch
+        </button>
+      ) : punchPhase === "monitor" ? (
+        <button className="take-punch go" onClick={onPunchIn} title="Start replacing from here (P)">
+          ● Punch in <kbd>P</kbd>
+        </button>
+      ) : punchPhase === "recording" ? (
+        <button className="take-punch rec" onClick={onStopPunch} title="Stop and save (P / Space)">
+          ■ Stop
+        </button>
+      ) : (
+        <span className="take-punch wait">{punchPhase === "saving" ? "saving…" : "cueing…"}</span>
+      )}
       <a
         className="take-dl"
         href={href ?? "#"}
@@ -327,6 +369,7 @@ function LyricPad({
   placeholder,
   label,
   showMeter,
+  onSelectWord,
 }: {
   areaRef: React.RefObject<HTMLTextAreaElement>;
   value: string;
@@ -334,6 +377,7 @@ function LyricPad({
   placeholder: string;
   label: string;
   showMeter: boolean;
+  onSelectWord: (w: string) => void;
 }) {
   const back = useRef<HTMLDivElement>(null);
   const lines = useMemo(() => value.split("\n"), [value]);
@@ -364,6 +408,11 @@ function LyricPad({
           className="lyrics"
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          onSelect={(e) => {
+            const el = e.target as HTMLTextAreaElement;
+            const sel = el.value.slice(el.selectionStart, el.selectionEnd).trim();
+            if (sel && sel.length <= 30 && !/\s/.test(sel)) onSelectWord(sel.replace(/[^a-zA-Z'-]/g, ""));
+          }}
           onScroll={(e) => {
             if (back.current) back.current.scrollLeft = (e.target as HTMLTextAreaElement).scrollLeft;
           }}

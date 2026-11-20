@@ -1,0 +1,16 @@
+{
+  "name": "Inkbeat — lyric pad",
+  "short_name": "Inkbeat",
+  "description": "Write lyrics to YouTube beats, timestamp your bars, record flows.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#15120e",
+  "theme_color": "#15120e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

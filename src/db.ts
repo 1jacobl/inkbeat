@@ -24,6 +24,10 @@ export interface Project {
   backing?: { videoId: string; url: string; offset: number };
   /** Which video plays: the main one or the backing track. */
   source?: "main" | "backing";
+  /** Beat grid for the metronome, bar lines and snapping. */
+  tempo?: { bpm: number; downbeat: number; beatsPerBar: number };
+  /** Free-form scratchpad for ideas, unused bars, references. */
+  notes?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -44,7 +48,7 @@ export interface Take {
 }
 
 const DB_NAME = "inkbeat";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function open(): Promise<IDBDatabase> {
@@ -57,6 +61,10 @@ function open(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains("takes")) {
         const s = db.createObjectStore("takes", { keyPath: "id" });
         s.createIndex("projectId", "projectId");
+      }
+      if (!db.objectStoreNames.contains("history")) {
+        const h = db.createObjectStore("history", { keyPath: "id" });
+        h.createIndex("projectId", "projectId");
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -72,7 +80,7 @@ function wrap<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function store(name: "projects" | "takes", mode: IDBTransactionMode) {
+async function store(name: "projects" | "takes" | "history", mode: IDBTransactionMode) {
   const db = await open();
   return db.transaction(name, mode).objectStore(name);
 }
@@ -91,6 +99,7 @@ export async function deleteProject(id: string): Promise<void> {
   const s = await store("takes", "readwrite");
   await Promise.all(takes.map((t) => wrap(s.delete(t.id))));
   await wrap((await store("projects", "readwrite")).delete(id));
+  await deleteSnapshotsFor(id).catch(() => {});
 }
 
 export async function listTakes(projectId: string): Promise<Take[]> {
@@ -111,4 +120,36 @@ export async function deleteTakesForMarker(projectId: string, markerId: string):
   const takes = (await listTakes(projectId)).filter((t) => t.markerId === markerId);
   const s = await store("takes", "readwrite");
   await Promise.all(takes.map((t) => wrap(s.delete(t.id))));
+}
+
+/* ---------- lyric history ---------- */
+export interface Snapshot {
+  id: string;
+  projectId: string;
+  at: number;
+  markers: { id: string; time: number; label: string; lyrics: string; original?: Marker["original"] }[];
+  notes: string;
+}
+
+const KEEP = 80;
+
+export async function listSnapshots(projectId: string): Promise<Snapshot[]> {
+  const s = await store("history", "readonly");
+  const all = await wrap(s.index("projectId").getAll(projectId) as IDBRequest<Snapshot[]>);
+  return all.sort((a, b) => b.at - a.at);
+}
+
+export async function saveSnapshot(snap: Snapshot): Promise<void> {
+  await wrap((await store("history", "readwrite")).put(snap));
+  const all = await listSnapshots(snap.projectId);
+  if (all.length > KEEP) {
+    const s = await store("history", "readwrite");
+    await Promise.all(all.slice(KEEP).map((x) => wrap(s.delete(x.id))));
+  }
+}
+
+export async function deleteSnapshotsFor(projectId: string): Promise<void> {
+  const all = await listSnapshots(projectId);
+  const s = await store("history", "readwrite");
+  await Promise.all(all.map((x) => wrap(s.delete(x.id))));
 }

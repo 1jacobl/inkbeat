@@ -11,13 +11,14 @@ interface Props {
   onSeek: (t: number) => void;
   onMoveMarker: (id: string, t: number) => void;
   loop: { start: number; end: number } | null;
+  tempo: { bpm: number; downbeat: number; beatsPerBar: number } | null;
 }
 
 /**
  * A tape strip: the whole beat, with marker flags above and recorded flows below.
  * Drag the strip to scrub; drag a flag to move that section; click a flag to jump to it.
  */
-export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek, onMoveMarker, loop }: Props) {
+export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek, onMoveMarker, loop, tempo }: Props) {
   const duration = useClock((s) => Math.floor(s.duration * 10) / 10);
   const head = useClock((s) => (s.duration ? Math.round((s.now / s.duration) * 2000) / 20 : 0));
   const ref = useRef<HTMLDivElement>(null);
@@ -70,7 +71,11 @@ export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek
         aria-valuemax={duration}
         aria-valuenow={Math.round((head / 100) * duration)}
       >
-        <div className="ticks" />
+        {tempo && duration ? (
+          <BarLines tempo={tempo} duration={duration} />
+        ) : (
+          <div className="ticks" />
+        )}
         <div className="played" style={{ width: `${scrub ?? head}%` }} />
         {loop && (
           <div className="loop-zone" style={{ left: `${pct(loop.start)}%`, width: `${pct(loop.end) - pct(loop.start)}%` }} />
@@ -129,6 +134,23 @@ export default function Timeline({ markers, takes, activeId, recMarkerId, onSeek
         <span>{fmt(duration / 2)}</span>
         <span>{fmt(duration)}</span>
       </div>
+    </div>
+  );
+}
+
+function BarLines({ tempo, duration }: { tempo: { bpm: number; downbeat: number; beatsPerBar: number }; duration: number }) {
+  const bar = (60 / tempo.bpm) * tempo.beatsPerBar;
+  const lines: { t: number; n: number }[] = [];
+  let n = Math.ceil(-tempo.downbeat / bar);
+  for (let t = tempo.downbeat + n * bar; t <= duration && lines.length < 400; t += bar, n++) if (t >= 0) lines.push({ t, n });
+  const every = lines.length > 120 ? 4 : 1; // thin out on long songs
+  return (
+    <div className="bars" aria-hidden>
+      {lines.map((l) =>
+        l.n % every === 0 ? (
+          <i key={l.n} className={l.n % 4 === 0 ? "four" : ""} style={{ left: `${(l.t / duration) * 100}%` }} />
+        ) : null
+      )}
     </div>
   );
 }
