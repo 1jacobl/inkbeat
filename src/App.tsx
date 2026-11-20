@@ -28,6 +28,7 @@ import { fmt, parseTime, uid } from "./time";
 import Timeline from "./Timeline";
 import MarkerBlock from "./MarkerBlock";
 import CoverDialog from "./CoverDialog";
+import { findDuplicates, pairSections } from "./dedupe";
 import type { LyricHit } from "./lyrics";
 
 const LAST_KEY = "inkbeat:last";
@@ -871,29 +872,19 @@ export default function App() {
         if (!ok) return;
       }
       const hasTakes = (id: string) => takes.some((t) => t.markerId === id);
-      // Pair new sections with old imported ones (within 4s) so your words and takes carry over.
-      // Sections you've written in or recorded on get first pick.
+      // Pair new sections with the old ones they replace (by lyric lines, then time) so your words and takes carry over.
       const hasContent = (m: Marker) => !!m.lyrics.trim() || hasTakes(m.id);
-      const order = [...oldImported].sort((a, b) => Number(hasContent(b)) - Number(hasContent(a)));
-      const used = new Set<string>();
-      const claim = new Map<number, Marker>(); // index in `imported` -> old marker
-      for (const o of order) {
-        let bi = -1;
-        imported.forEach((n, i) => {
-          if (claim.has(i) || Math.abs(o.time - n.time) > 4) return;
-          if (bi < 0 || Math.abs(o.time - n.time) < Math.abs(o.time - imported[bi].time)) bi = i;
-        });
-        if (bi >= 0) {
-          claim.set(bi, o);
-          used.add(o.id);
-        }
-      }
+      const claim = pairSections(oldImported, imported, (m) => (hasContent(m) ? 1 : 0));
+      const used = new Set([...claim.values()].map((m) => m.id));
       const merged = imported.map((n, i) => {
         const o = claim.get(i);
         return o ? { ...n, id: o.id, label: o.label, lyrics: o.lyrics } : n;
       });
-      // Old imported sections with no match: keep them only if you wrote or recorded something there.
-      const leftovers = oldImported.filter((o) => !used.has(o.id) && (o.lyrics.trim() || hasTakes(o.id)));
+      // Old sections with no match: keep only ones you wrote or recorded in, as plain sections
+      // (without the old imported lines, so they don't show up as copies).
+      const leftovers = oldImported
+        .filter((o) => !used.has(o.id) && (o.lyrics.trim() || hasTakes(o.id)))
+        .map(({ original, ...m }) => m as Marker);
       update(project.id, (p) => ({
         ...p,
         markers: [...p.markers.filter((m) => !m.original), ...leftovers, ...merged].sort((a, b) => a.time - b.time),
@@ -1214,9 +1205,16 @@ export default function App() {
           const s = byId.get(m.id);
           return s ? { ...m, label: s.label, lyrics: s.lyrics } : m;
         });
-        for (const s of snap.markers)
-          if (!p.markers.some((m) => m.id === s.id))
-            markers.push({ id: s.id, time: s.time, label: s.label, lyrics: s.lyrics, ...(s.original ? { original: s.original } : {}) });
+        for (const s of snap.markers) {
+          if (markers.some((m) => m.id === s.id)) continue;
+          // Same spot already has a section: put the old words there instead of adding a copy.
+          const i = markers.findIndex((m) => Math.abs(m.time - s.time) <= 0.6);
+          if (i >= 0) {
+            if (!markers[i].lyrics.trim()) markers[i] = { ...markers[i], lyrics: s.lyrics, label: markers[i].label || s.label };
+            continue;
+          }
+          markers.push({ id: s.id, time: s.time, label: s.label, lyrics: s.lyrics, ...(s.original ? { original: s.original } : {}) });
+        }
         return { ...p, markers: markers.sort((a, b) => a.time - b.time), notes: snap.notes };
       });
       lastSigRef.current.delete(project.id);
@@ -1360,6 +1358,48 @@ export default function App() {
       setBpmBusy(null);
     }
   }, [project, update, flash]);
+
+  /* ---------- clean up duplicate sections ---------- */
+  const dupGroups = useMemo(
+    () => findDuplicates(markers, (id) => takes.filter((t) => t.markerId === id).length),
+    [markers, takes]
+  );
+  const dupCount = dupGroups.reduce((n, g) => n + g.length - 1, 0);
+  const cleanDuplicates = useCallback(async () => {
+    if (!project || !dupGroups.length) return;
+    if (!confirm(`Merge ${dupCount} duplicate section${dupCount === 1 ? "" : "s"}? Your lyrics and takes are kept on the remaining copy. (History has your current version if you need it back.)`)) return;
+    await takeSnapshot(project, true);
+    const remove = new Map<string, string>(); // removed id -> kept id
+    for (const g of dupGroups) for (const m of g.slice(1)) remove.set(m.id, g[0].id);
+    // Move takes onto the kept section.
+    const moved: Take[] = [];
+    setTakes((ts) =>
+      ts.map((t) => {
+        const to = remove.get(t.markerId);
+        if (!to) return t;
+        const u = { ...t, markerId: to };
+        moved.push(u);
+        return u;
+      })
+    );
+    update(project.id, (p) => ({
+      ...p,
+      markers: p.markers
+        .filter((m) => !remove.has(m.id))
+        .map((m) => {
+          const g = dupGroups.find((x) => x[0].id === m.id);
+          if (!g) return m;
+          // Fill in anything the keeper was missing from its copies.
+          const lyrics = m.lyrics.trim() ? m.lyrics : g.find((x) => x.lyrics.trim())?.lyrics ?? "";
+          const label = m.label || g.find((x) => x.label)?.label || "";
+          const original = m.original ?? g.find((x) => x.original)?.original;
+          return { ...m, lyrics, label, ...(original ? { original } : {}) };
+        }),
+    }));
+    await sleep(0);
+    await Promise.all(moved.map(saveTake));
+    flash(`Merged ${dupCount} duplicate section${dupCount === 1 ? "" : "s"}`);
+  }, [project, dupGroups, dupCount, takeSnapshot, update, flash]);
 
   /* ---------- song codes ---------- */
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -1971,6 +2011,15 @@ export default function App() {
                     </form>
                   )}
                 </div>
+              </div>
+            )}
+
+            {dupCount > 0 && (
+              <div className="dup-bar" role="status">
+                <span>
+                  <b>{dupCount}</b> duplicate section{dupCount === 1 ? "" : "s"} (same spot, same lyrics)
+                </span>
+                <button onClick={cleanDuplicates}>Clean up</button>
               </div>
             )}
 
