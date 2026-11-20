@@ -53,7 +53,9 @@ export interface Take {
 }
 
 const DB_NAME = "inkbeat";
-const DB_VERSION = 2;
+// No version number: open whatever version exists. Upgrading the main database can get stuck
+// in Chrome (another tab holds it), so new storage goes in separate databases instead.
+const HISTORY_DB = "inkbeat-history";
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 /** Set when another open Inkbeat tab is holding up a storage upgrade. */
@@ -66,17 +68,14 @@ function open(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") return reject(new Error("no-indexeddb"));
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(DB_NAME);
+    // Only runs the very first time (brand-new database).
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains("projects")) db.createObjectStore("projects", { keyPath: "id" });
       if (!db.objectStoreNames.contains("takes")) {
         const s = db.createObjectStore("takes", { keyPath: "id" });
         s.createIndex("projectId", "projectId");
-      }
-      if (!db.objectStoreNames.contains("history")) {
-        const h = db.createObjectStore("history", { keyPath: "id" });
-        h.createIndex("projectId", "projectId");
       }
     };
     // Another tab still has the old version open: tell the user instead of hanging.
@@ -105,7 +104,33 @@ function wrap<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+let historyPromise: Promise<IDBDatabase> | null = null;
+function openHistory(): Promise<IDBDatabase> {
+  if (historyPromise) return historyPromise;
+  historyPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(HISTORY_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("history")) db.createObjectStore("history", { keyPath: "id" }).createIndex("projectId", "projectId");
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => {
+        db.close();
+        historyPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      historyPromise = null;
+      reject(req.error);
+    };
+  });
+  return historyPromise;
+}
+
 async function store(name: "projects" | "takes" | "history", mode: IDBTransactionMode) {
+  if (name === "history") return (await openHistory()).transaction("history", mode).objectStore("history");
   const db = await open();
   return db.transaction(name, mode).objectStore(name);
 }
