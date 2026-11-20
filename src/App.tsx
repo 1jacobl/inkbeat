@@ -965,7 +965,7 @@ export default function App() {
         </button>
         <nav className="songs" aria-label="Songs">
           {projects.map((p) => (
-            <div key={p.id} className={`song ${p.id === currentId ? "current" : ""}`}>
+            <div key={p.id} className={`song ${p.id === currentId && view === "song" ? "current" : ""}`}>
               <button className="song-open" onClick={() => switchProject(p.id)}>
                 <span className="song-title">{p.title || "Untitled song"}</span>
                 <span className="song-meta">
