@@ -20,6 +20,7 @@ import Perform from "./Perform";
 import Drawer, { DrawerTab } from "./Drawer";
 import { Snapshot, listSnapshots, saveSnapshot } from "./db";
 import { mixTakes, splicePunch } from "./audio";
+import { captureTabAudio, detectFromStream, findBpm } from "./bpm";
 import { bpmFromTitle, countIn, makeTapper, metronome, snapToBeat } from "./metronome";
 import { exportBackup, exportLyricsText, importBackup } from "./backup";
 import { fmt, parseTime, uid } from "./time";
@@ -883,6 +884,7 @@ export default function App() {
         ...p,
         markers: [...p.markers.filter((m) => !m.original), ...leftovers, ...merged].sort((a, b) => a.time - b.time),
         cover: { track: hit.track, artist: hit.artist, showOriginal: p.cover?.showOriginal ?? true },
+        autoBpm: undefined,
       }));
       setCoverOpen(false);
       flash(oldImported.length ? `Replaced with ${merged.length} sections` : `Imported ${merged.length} sections`);
@@ -1218,6 +1220,7 @@ export default function App() {
         if (!patch) return { ...p, tempo: undefined };
         const cur = p.tempo ?? { bpm: 0, downbeat: 0, beatsPerBar: 4 };
         const next = { ...cur, ...patch };
+        if (patch.bpm !== undefined && patch.bpm !== cur.bpm) next.source = "manual";
         next.bpm = Math.max(0, Math.min(240, Math.round(next.bpm * 2) / 2));
         return { ...p, tempo: next.bpm > 0 ? next : undefined };
       });
@@ -1242,20 +1245,76 @@ export default function App() {
     if (r.first) tapFirstRef.current = isPlaying() ? estimateNow() : null;
     if (r.bpm) setTempo({ bpm: r.bpm, ...(tapFirstRef.current !== null ? { downbeat: tapFirstRef.current } : {}) });
   }, [tapper, setTempo]);
-  // "Find" the BPM: type beats usually say it in the title.
+  // Automatic BPM: covers check a song database; beats check the video name, then its description.
+  const [bpmBusy, setBpmBusy] = useState<string | null>(null);
+  const runAutoBpm = useCallback(
+    async (p: Project, announce: boolean) => {
+      setBpmBusy("Looking for the BPM…");
+      const title = (playerRef.current as any)?.getVideoData?.()?.title || p.title;
+      const found = await findBpm({ videoTitle: title || "", videoId: p.videoId, cover: p.cover ? { track: p.cover.track, artist: p.cover.artist } : null });
+      setBpmBusy(null);
+      update(p.id, (x) => {
+        const next: Project = { ...x, autoBpm: found };
+        if (found && (!x.tempo || x.tempo.source === "auto")) next.tempo = { bpm: found.bpm, downbeat: x.tempo?.downbeat ?? 0, beatsPerBar: 4, source: "auto" };
+        return next;
+      });
+      if (found) flash(`Found ${found.bpm} BPM in the ${found.from}.`);
+      else if (announce) flash("Couldn't find a BPM in the video name or description. Try Listen, or tap it.");
+    },
+    [update, flash]
+  );
   useEffect(() => {
-    if (!ready || !project || project.tempo) return;
-    const id = project.id;
-    const t = window.setTimeout(() => {
-      const title = (playerRef.current as any)?.getVideoData?.()?.title || project.title;
-      const bpm = bpmFromTitle(title || "");
-      if (bpm) {
-        update(id, (p) => (p.tempo ? p : { ...p, tempo: { bpm, downbeat: 0, beatsPerBar: 4 } }));
-        flash(`Found ${bpm} BPM in the title. Tap "Beat 1" on a downbeat to line up the click.`);
-      }
-    }, 1500);
+    if (!ready || !project || !project.videoId || project.autoBpm !== undefined) return;
+    const p = project;
+    const t = window.setTimeout(() => runAutoBpm(projectsRef.current.find((x) => x.id === p.id) ?? p, false), 1500);
     return () => window.clearTimeout(t);
-  }, [ready, project?.id, project?.videoId, !!project?.tempo]);
+  }, [ready, project?.id, project?.videoId, project?.autoBpm === undefined, runAutoBpm]);
+
+  const tempoAuto = !!tempo && tempo.source === "auto";
+  const autoFound = project?.autoBpm ?? null;
+  const [overriding, setOverriding] = useState(false);
+  useEffect(() => setOverriding(false), [project?.id]);
+  const tempoLocked = tempoAuto && !overriding;
+  const backToAuto = useCallback(() => {
+    if (!project || !autoFound) return;
+    update(project.id, (p) => ({
+      ...p,
+      tempo: { ...(p.tempo ?? { downbeat: 0, beatsPerBar: 4 }), bpm: autoFound.bpm, ...(autoFound.downbeat !== undefined ? { downbeat: autoFound.downbeat } : {}), source: "auto" },
+    }));
+    setOverriding(false);
+    flash(`Back to ${autoFound.bpm} BPM from the ${autoFound.from}`);
+  }, [project, autoFound, update, flash]);
+
+  // Listen: share this tab's audio for ~12s and work out the BPM and bar start from the sound.
+  const canListen = typeof navigator !== "undefined" && !!(navigator.mediaDevices as any)?.getDisplayMedia;
+  const listenForBpm = useCallback(async () => {
+    if (!project || !playerRef.current) return flash("Load the beat first");
+    let stream: MediaStream | null = null;
+    try {
+      stream = await captureTabAudio();
+    } catch {
+      return flash("Listening was cancelled.");
+    }
+    if (!stream) return flash("Pick this tab and keep “Share tab audio” switched on.");
+    const p = project;
+    try {
+      if (!isPlaying()) playerRef.current.playVideo();
+      const res = await detectFromStream(
+        stream,
+        12,
+        (ctxTime, ctx) => estimateNow() - (ctx.currentTime - ctxTime),
+        (pr) => setBpmBusy(`Listening… ${Math.round(pr * 100)}%`)
+      );
+      if (!res) return flash("Couldn't hear a clear beat. Make sure it's playing with the volume up.");
+      const found = { bpm: res.bpm, from: "audio" as const, downbeat: res.downbeat };
+      update(p.id, (x) => ({ ...x, autoBpm: found, tempo: { bpm: res.bpm, downbeat: res.downbeat, beatsPerBar: 4, source: "auto" } }));
+      setOverriding(false);
+      flash(`Heard ${res.bpm} BPM. Bar start set to ${fmt(res.downbeat, true)}.`);
+    } finally {
+      stream.getTracks().forEach((t) => t.stop());
+      setBpmBusy(null);
+    }
+  }, [project, update, flash]);
 
   /* ---------- keyboard ---------- */
   const viewRef = useRef(view);
@@ -1564,18 +1623,34 @@ export default function App() {
                 <div className="tempo-box">
                   <div className="tempo-head">
                     <span className="tempo-title">Tempo</span>
-                    <span className="tempo-sub">for the metronome &amp; bar lines</span>
+                    {tempo ? (
+                      <span className={`tempo-mode ${tempoAuto ? "auto" : "manual"}`}>
+                        {tempoAuto ? `Auto · from ${autoFound?.from ?? "video name"}` : "Manual"}
+                      </span>
+                    ) : (
+                      <span className="tempo-sub">for the metronome &amp; bar lines</span>
+                    )}
+                    {tempoLocked ? (
+                      <button className="tempo-act" onClick={() => setOverriding(true)} title="Set your own BPM instead of the one in the title">
+                        Override
+                      </button>
+                    ) : tempo && !tempoAuto && autoFound ? (
+                      <button className="tempo-act" onClick={backToAuto} title={`Use ${autoFound.bpm} BPM from the ${autoFound.from} again`}>
+                        Back to auto ({autoFound.bpm})
+                      </button>
+                    ) : null}
                   </div>
-                  <div className="tempo">
+                  <div className={`tempo ${tempoLocked ? "locked" : ""}`} title={tempoLocked ? "Using the BPM from the title. Press Override to change it." : undefined}>
                     <Stepper
                       label="Tempo"
+                      disabled={tempoLocked}
                       title="Beats per minute. Click the number to clear it."
                       value={tempo?.bpm ?? 0}
                       step={1}
                       format={(v) => (v ? `${v} BPM` : "– BPM")}
                       onChange={(v) => setTempo(v > 0 ? { bpm: tempo ? v : Math.max(v, 60) } : null)}
                     />
-                    <button className="tap" onClick={tapTempo} title="Tap along with the beat to measure its BPM">
+                    <button className="tap" onClick={tapTempo} disabled={tempoLocked} title="Tap along with the beat to measure its BPM">
                       {tapCount > 0 ? `Tap ${tapCount}` : "Tap tempo"}
                     </button>
                   </div>
@@ -1587,6 +1662,17 @@ export default function App() {
                   >
                     Set bar start here <span>{fmt(Math.max(0, tempo?.downbeat ?? 0), true)}</span>
                   </button>
+                  <div className="tempo-find">
+                    <button onClick={() => project && runAutoBpm(project, true)} disabled={!!bpmBusy || !project.videoId} title="Check the video name, the description, and (for covers) a song database">
+                      Find BPM
+                    </button>
+                    {canListen && (
+                      <button onClick={listenForBpm} disabled={!!bpmBusy || !ready} title="Listen to the beat for 12 seconds and work out the BPM from the sound (Chrome: pick this tab and share its audio)">
+                        Listen
+                      </button>
+                    )}
+                    {bpmBusy && <span className="tempo-busy">{bpmBusy}</span>}
+                  </div>
                   <div className="tempo-metro">
                     <Switch
                       on={prefs.metronome}
@@ -1600,12 +1686,16 @@ export default function App() {
                     />
                   </div>
                   <p className="tempo-hint">
-                    {tapCount > 0 && tapCount < 3
+                    {tempoLocked
+                      ? autoFound?.from === "audio"
+                        ? "BPM and bar start worked out by listening. Press Override to tap or type your own."
+                        : `Using the BPM from the ${autoFound?.from ?? "video name"}. Press Override to tap or type your own.`
+                      : tapCount > 0 && tapCount < 3
                       ? "Keep tapping on every beat…"
                       : tapCount >= 3
                         ? `Got it: ${tempo?.bpm ?? "…"} BPM. Tap more to fine-tune.`
                         : !tempo
-                          ? "Play the beat and press Tap tempo on every beat (4+ taps), or type the BPM."
+                          ? "Press Find BPM or Listen, or tap along / type it yourself."
                           : "Then pause right on a “1” (where a bar starts) and press Set bar start here."}
                   </p>
                 </div>

@@ -955,3 +955,15 @@ kbd {
 .tempo-hint { margin: 0; font-size: 11px; line-height: 1.4; color: var(--dim); }
 .tempo-metro { display: flex; }
 .tempo-metro .switch { font-size: 13px; }
+.tempo-head { flex-wrap: wrap; }
+.tempo-mode { font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 999px; }
+.tempo-mode.auto { background: rgba(246, 214, 74, 0.18); color: var(--hi); }
+.tempo-mode.manual { background: var(--desk-3); color: var(--dim); }
+.tempo-act { margin-left: auto; background: none; border: 1px solid var(--edge); border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700; color: var(--chalk); }
+.tempo-act:hover { border-color: var(--tape); }
+.tempo.locked { opacity: 0.55; }
+.stepper.disabled button { cursor: not-allowed; }
+.tempo-find { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tempo-find button { background: var(--desk-3); border: 1px solid var(--edge); border-radius: 7px; padding: 5px 10px; font-size: 12px; font-weight: 700; }
+.tempo-find button:hover:not(:disabled) { border-color: var(--tape); }
+.tempo-busy { font-size: 11px; color: var(--hi); font-family: var(--mono); }

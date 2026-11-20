@@ -25,7 +25,9 @@ export interface Project {
   /** Which video plays: the main one or the backing track. */
   source?: "main" | "backing";
   /** Beat grid for the metronome, bar lines and snapping. */
-  tempo?: { bpm: number; downbeat: number; beatsPerBar: number };
+  tempo?: { bpm: number; downbeat: number; beatsPerBar: number; source?: "auto" | "manual" };
+  /** What the automatic lookup found (null = looked, found nothing; undefined = not looked yet). */
+  autoBpm?: { bpm: number; from: "video name" | "description" | "song database" | "audio"; downbeat?: number } | null;
   /** Free-form scratchpad for ideas, unused bars, references. */
   notes?: string;
   createdAt: number;

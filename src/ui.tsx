@@ -68,7 +68,9 @@ export function Stepper({
   format,
   label,
   title,
+  disabled,
 }: {
+  disabled?: boolean;
   value: number;
   onChange: (v: number) => void;
   step: number;
@@ -78,19 +80,20 @@ export function Stepper({
 }) {
   const round = (v: number) => Math.round(v * 1000) / 1000;
   return (
-    <div className="stepper" aria-label={label} title={title}>
-      <button type="button" onClick={() => onChange(round(value - step))} aria-label={`${label} down`}>
+    <div className={`stepper ${disabled ? "disabled" : ""}`} aria-label={label} title={title}>
+      <button type="button" disabled={disabled} onClick={() => onChange(round(value - step))} aria-label={`${label} down`}>
         −
       </button>
       <button
         type="button"
         className={`stepper-val ${value !== 0 ? "set" : ""}`}
+        disabled={disabled}
         onClick={() => onChange(0)}
         title="Reset to 0"
       >
         {format(value)}
       </button>
-      <button type="button" onClick={() => onChange(round(value + step))} aria-label={`${label} up`}>
+      <button type="button" disabled={disabled} onClick={() => onChange(round(value + step))} aria-label={`${label} up`}>
         +
       </button>
     </div>
