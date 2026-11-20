@@ -94,7 +94,7 @@ export default function MarkerBlock(p: Props) {
               setTimeDraft(fmt(marker.time, true));
               setEditingTime(true);
             }}
-            title="Play from here · double-click to edit time"
+            title="Jump the video here and play · double-click to type a time"
           >
             {fmt(marker.time, true)}
           </button>
@@ -108,8 +108,8 @@ export default function MarkerBlock(p: Props) {
           >
             {p.looping ? "■ looping" : "⟲ loop"}
           </button>
-          <button onClick={p.onRestamp} title="Move this marker to the playhead">
-            ⤓ now
+          <button onClick={p.onRestamp} title="Move this marker to where the video is right now (click the time above to jump the video here instead)">
+            ⤓ set to now
           </button>
           <button onClick={p.onDelete} title="Delete marker" className="danger">
             delete
