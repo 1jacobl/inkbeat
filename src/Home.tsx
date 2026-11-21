@@ -1,4 +1,3 @@
-import logo from "./logo.svg";
 
 interface Props {
   currentTitle: string | null;
@@ -32,14 +31,6 @@ export default function Home({ currentTitle, songCount, onOpen, onNew }: Props) 
             <button className={currentTitle && songCount > 0 ? "cta ghost" : "cta"} onClick={onNew}>
               + New song
             </button>
-          </div>
-        </div>
-        <div className="hero-art" aria-hidden>
-          <img src={logo} alt="" className="hero-logo" />
-          <div className="hero-lines">
-            <span style={{ width: "86%" }} />
-            <span className="mark" style={{ width: "72%" }} />
-            <span style={{ width: "64%" }} />
           </div>
         </div>
       </section>

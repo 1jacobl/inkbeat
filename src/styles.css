@@ -719,7 +719,7 @@ kbd {
 
 .hero {
   position: relative; overflow: hidden;
-  display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; align-items: center;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: center;
   background: var(--desk-2); color: var(--chalk); border: 1px solid var(--edge); border-radius: 18px; padding: clamp(24px, 5vw, 56px);
   animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
@@ -1195,3 +1195,6 @@ kbd {
 
 /* Hover-scrolling titles */
 .marquee-on { text-overflow: clip !important; }
+.brand { gap: 6px; }
+.brand-mark { box-shadow: none; border-radius: 0; transform-origin: 50% 90%; }
+.brand:hover .brand-mark { transform: rotate(-14deg); }

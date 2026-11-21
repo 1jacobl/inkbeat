@@ -1917,7 +1917,7 @@ export default function App() {
           }}
           title="Home"
         >
-          <img className="brand-mark" src={logo} alt="" width={30} height={30} />
+          <img className="brand-mark" src={logo} alt="" width={17} height={28} />
           Inkbeat
         </button>
         <button className="new-song" onClick={createProject}>
