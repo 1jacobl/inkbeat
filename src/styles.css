@@ -1198,3 +1198,13 @@ kbd {
 .brand { gap: 6px; }
 .brand-mark { box-shadow: none; border-radius: 0; transform-origin: 50% 90%; }
 .brand:hover .brand-mark { transform: rotate(-14deg); }
+.hero-ctas { flex-wrap: nowrap; }
+.cta { display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; padding: 12px 22px; font-size: 16px; }
+.hero-last { margin: 14px 0 0; font: 500 12px/1.4 var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46ch; }
+.hero-last span { color: var(--dim); }
+@media (max-width: 520px) {
+  .hero-ctas .cta { flex: 1; padding: 12px 14px; font-size: 15px; }
+}
+.hero > * { min-width: 0; }
+.hero-last { max-width: min(46ch, 100%); }
+@media (max-width: 520px) { .hero-ctas .cta { min-width: 0; } }

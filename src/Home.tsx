@@ -25,13 +25,18 @@ export default function Home({ currentTitle, songCount, onOpen, onNew }: Props) 
           <div className="hero-ctas">
             {currentTitle && songCount > 0 ? (
               <button className="cta" onClick={onOpen}>
-                Open “{currentTitle.length > 28 ? currentTitle.slice(0, 27) + "…" : currentTitle}”
+                Keep writing <span aria-hidden>→</span>
               </button>
             ) : null}
             <button className={currentTitle && songCount > 0 ? "cta ghost" : "cta"} onClick={onNew}>
               + New song
             </button>
           </div>
+          {currentTitle && songCount > 0 ? (
+            <p className="hero-last">
+              Last open: <span>{currentTitle}</span>
+            </p>
+          ) : null}
         </div>
       </section>
 
