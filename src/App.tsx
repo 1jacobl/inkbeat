@@ -23,6 +23,7 @@ import { attachPlayer, estimateNow, getOffset, isPlaying, noteSeek, setOffset, u
 import { KeyPicker, Segmented, Stepper, Switch } from "./ui";
 import { keyInText, keyName, relative, scaleNotes } from "./key";
 import logo from "./logo.svg";
+import { marquee } from "./marquee";
 import Home from "./Home";
 import Perform from "./Perform";
 import Drawer, { DrawerTab } from "./Drawer";
@@ -1926,7 +1927,7 @@ export default function App() {
           {projects.map((p) => (
             <div key={p.id} className={`song ${p.id === currentId && view === "song" ? "current" : ""}`}>
               <button className="song-open" onClick={() => switchProject(p.id)}>
-                <span className="song-title">{p.title || "Untitled song"}</span>
+                <span className="song-title" {...marquee}>{p.title || "Untitled song"}</span>
                 <span className="song-meta">
                   {p.markers.length} marker{p.markers.length === 1 ? "" : "s"}
                   {hasBeat(p) ? "" : " · no beat"}
@@ -2032,6 +2033,7 @@ export default function App() {
               </button>
               <input
                 className="title-input"
+                {...marquee}
                 value={project.title}
                 onChange={(e) => update(project.id, (p) => ({ ...p, title: e.target.value }))}
                 aria-label="Song title"

@@ -1,3 +1,4 @@
+import { marquee } from "./marquee";
 import { useEffect, useMemo, useRef } from "react";
 import type { Marker } from "./db";
 import { useClock } from "./clock";
@@ -71,7 +72,7 @@ export default function Perform({ title, markers, duration, onTogglePlay, onSeek
   return (
     <div className="perform" role="dialog" aria-label="Performance view">
       <header className="perform-bar">
-        <span className="perform-title">{title}</span>
+        <span className="perform-title" {...marquee}>{title}</span>
         <span className="perform-time">
           {fmt(now)} / {fmt(duration)}
         </span>

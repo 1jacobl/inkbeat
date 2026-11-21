@@ -1192,3 +1192,6 @@ kbd {
   .ab-bar { padding-right: 40px; }
   .ab-x { position: absolute; top: 8px; right: 8px; }
 }
+
+/* Hover-scrolling titles */
+.marquee-on { text-overflow: clip !important; }
