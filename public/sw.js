@@ -1,8 +1,8 @@
 /* Inkbeat offline support: the app itself works offline; YouTube beats and lyric/rhyme lookups still need internet. */
-const CACHE = "inkbeat-v1";
+const CACHE = "inkbeat-v2";
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(["./", "./index.html", "./manifest.webmanifest", "./icon-record.svg"])).catch(() => {}));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(["./", "./index.html", "./manifest.webmanifest", "./icon-nib.svg"])).catch(() => {}));
   self.skipWaiting();
 });
 
